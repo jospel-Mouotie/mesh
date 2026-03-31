@@ -67,7 +67,11 @@ class MainActivity : ComponentActivity() {
     private val SuccessGreen = Color(0xFF34A853)
     private val WarningOrange = Color(0xFFFBBC04)
     private val ErrorRed = Color(0xFFEA4335)
-
+    private val RECEIVER_FLAG = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        Context.RECEIVER_NOT_EXPORTED
+    } else {
+        0
+    }
     // --- State ---
     private val messages = mutableStateListOf<ChatMessage>()
     private val nodes = mutableStateMapOf<String, MeshNode>()
@@ -1200,22 +1204,14 @@ class MainActivity : ComponentActivity() {
         }
 
         try {
-            // Correction : On définit le flag dans une variable pour plus de clarté
-            val listenFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                Context.RECEIVER_EXPORTED
-            } else {
-                0 // Pas de flag nécessaire pour les anciennes versions (comme ton vivo)
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(meshReceiver, filter, listenFlags)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) { // API 31+
+                registerReceiver(meshReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
             } else {
                 registerReceiver(meshReceiver, filter)
             }
-
-            Log.d(TAG, "✅ Système Mesh : Receivers enregistrés")
+            Log.d(TAG, "✅ Receivers enregistrés")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Erreur : ${e.message}")
+            Log.e(TAG, "❌ Erreur d'enregistrement : ${e.message}")
         }
     }
     private val meshReceiver = object : BroadcastReceiver() {
@@ -1483,7 +1479,6 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-
     private fun sendAudioMessage(audioFile: File, receiver: String) {
         val id = UUID.randomUUID().toString()
         val currentTime = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())

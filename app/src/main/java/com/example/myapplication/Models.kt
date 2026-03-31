@@ -49,7 +49,8 @@ data class MeshPacket(
     val fileData: ByteArray? = null,
     val fileName: String? = null,
     val hopCount: Int = 0,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val tcpPort: Int = 8888  // Port TCP fixe pour tous
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

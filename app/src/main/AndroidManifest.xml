@@ -2,30 +2,36 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- ===== PERMISSIONS ===== -->
     <!-- Internet et réseau -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
 
-    <!-- Localisation (requise pour WiFi Direct avant Android 12) -->
+    <!-- Localisation — obligatoire pour WiFi Direct sur Android 8/9/10/11 -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- ⚠️ ACCESS_BACKGROUND_LOCATION n'est pas nécessaire pour WiFi Direct -->
-    <!-- <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/> -->
+    <!-- Bluetooth legacy Android 8-11 -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
 
-    <!-- Bluetooth (compatible toutes versions) -->
-    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Bluetooth Android 12+ -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"
+        tools:targetApi="s" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"
+        tools:targetApi="s" />
 
-    <!-- WiFi Direct (Android 12+) -->
+    <!-- WiFi Direct Android 13+ (remplace LOCATION pour WiFi Direct) -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
-        android:usesPermissionFlags="neverForLocation" />
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="tiramisu" />
 
     <!-- Audio -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -37,9 +43,11 @@
 
     <!-- Services foreground -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Android 14+ : type connectedDevice obligatoire -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"
+        tools:targetApi="upside_down_cake" />
 
-    <!-- ===== FEATURES (optionnelles) ===== -->
+    <!-- Features optionnelles -->
     <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
@@ -55,7 +63,6 @@
         android:requestLegacyExternalStorage="true"
         tools:targetApi="31">
 
-        <!-- Main Activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -68,11 +75,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Test Activity (optionnel) -->
-        <activity
-            android:name=".TestActivity"
-            android:exported="true" />
-
         <!-- Mesh foreground service -->
         <service
             android:name=".MeshService"
@@ -80,17 +82,15 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
-        <!-- WiFi direct broadcast receiver -->
-        <receiver
-            android:name=".WifiDirectBroadcastReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.net.wifi.p2p.STATE_CHANGED" />
-                <action android:name="android.net.wifi.p2p.PEERS_CHANGED" />
-                <action android:name="android.net.wifi.p2p.CONNECTION_STATE_CHANGE" />
-                <action android:name="android.net.wifi.p2p.THIS_DEVICE_CHANGED" />
-            </intent-filter>
-        </receiver>
+        <!--
+            SUPPRIMÉ : WifiDirectBroadcastReceiver statique.
+            Android 8+ interdit la réception des intents WiFi Direct
+            (PEERS_CHANGED, CONNECTION_STATE_CHANGE) par les receivers
+            statiques déclarés dans le manifest → "Background execution
+            not allowed" dans les logs.
+            Le receiver dynamique dans MeshManager suffit et fonctionne
+            sur toutes les versions.
+        -->
 
         <!-- File provider pour les fichiers audio -->
         <provider
