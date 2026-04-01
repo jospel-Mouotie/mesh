@@ -18,47 +18,72 @@ class MeshService : Service() {
     private val CHANNEL_ID = "MeshServiceChannel"
     private val NOTIF_ID = 101
     private val TAG = "MeshService"
+    private val PREFS_NAME = "MIT_MESH_SETTINGS"
 
     private val isServiceReady = AtomicBoolean(false)
     private val isInitializing = AtomicBoolean(false)
     private val handler = Handler(Looper.getMainLooper())
 
-    // ==================== LIFECYCLE ====================
-
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "🚀 MeshService onCreate")
-        createNotificationChannel()
-
-        // CRITIQUE : startForeground() doit être appelé dans les 5 secondes suivant
-        // onCreate() sur Android 8+, et avec foregroundServiceType sur Android 14+.
-        // Le faire ici garantit qu'on ne rate jamais la fenêtre.
-        startForegroundNow()
+        try {
+            Log.i(TAG, "🚀 MeshService onCreate")
+            createNotificationChannel()
+            startForegroundNow()
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 Erreur dans onCreate", e)
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.i(TAG, "📞 onStartCommand (action=${intent?.action})")
+        try {
+            Log.i(TAG, "📞 onStartCommand (action=${intent?.action})")
 
-        // Mise à jour des IDs si fournis (premier démarrage ou redémarrage)
-        intent?.getStringExtra("user_id")?.let { myId = it }
-        intent?.getStringExtra("user_pseudo")?.let { myPseudo = it }
+            var id = intent?.getStringExtra("user_id")
+            var pseudo = intent?.getStringExtra("user_pseudo")
 
-        // Redémarrage système (intent null via START_STICKY) sans IDs → arrêt propre
-        if (myId == null || myPseudo == null) {
-            Log.e(TAG, "❌ IDs manquants — arrêt du service")
+            if (id == null || pseudo == null) {
+                val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                id = prefs.getString("user_id", null)
+                pseudo = prefs.getString("user_pseudo", null)
+                if (id != null && pseudo != null) {
+                    Log.i(TAG, "📦 IDs récupérés depuis les préférences : $id / $pseudo")
+                }
+            } else {
+                try {
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().apply {
+                        putString("user_id", id)
+                        putString("user_pseudo", pseudo)
+                        apply()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Erreur sauvegarde des IDs", e)
+                }
+            }
+
+            if (id == null || pseudo == null) {
+                Log.e(TAG, "❌ IDs manquants — arrêt du service")
+                stopSelf()
+                return START_NOT_STICKY
+            }
+
+            myId = id
+            myPseudo = pseudo
+
+            if (!isServiceReady.get() && !isInitializing.get()) {
+                isInitializing.set(true)
+                Log.i(TAG, "👤 ID: $myId | Pseudo: $myPseudo")
+                setupMeshManager()
+            }
+
+            intent?.let { handleIntentAction(it) }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 Exception dans onStartCommand: ${e.message}", e)
             stopSelf()
             return START_NOT_STICKY
         }
-
-        // Initialisation du MeshManager une seule fois
-        if (!isServiceReady.get() && !isInitializing.get()) {
-            isInitializing.set(true)
-            Log.i(TAG, "👤 ID: $myId | Pseudo: $myPseudo")
-            setupMeshManager()
-        }
-
-        // Traiter les actions (envoi message, topologie, etc.)
-        intent?.let { handleIntentAction(it) }
 
         return START_STICKY
     }
@@ -66,7 +91,11 @@ class MeshService : Service() {
     override fun onDestroy() {
         Log.i(TAG, "🛑 MeshService onDestroy")
         handler.removeCallbacksAndMessages(null)
-        meshManager?.stop()
+        try {
+            meshManager?.stop()
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur arrêt MeshManager", e)
+        }
         meshManager = null
         isServiceReady.set(false)
         isInitializing.set(false)
@@ -75,13 +104,10 @@ class MeshService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ==================== FOREGROUND ====================
-
     private fun startForegroundNow() {
         try {
             val notification = buildNotification()
             when {
-                // Android 14+ : foregroundServiceType obligatoire
                 Build.VERSION.SDK_INT >= 34 -> {
                     startForeground(
                         NOTIF_ID,
@@ -94,6 +120,7 @@ class MeshService : Service() {
             Log.d(TAG, "✅ Foreground service démarré (SDK ${Build.VERSION.SDK_INT})")
         } catch (e: Exception) {
             Log.e(TAG, "❌ startForeground échoué: ${e.message}", e)
+            stopSelf()
         }
     }
 
@@ -109,27 +136,36 @@ class MeshService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Mesh Network",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Notifications du réseau maillé"
-                setSound(null, null)
+            try {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "Mesh Network",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Notifications du réseau maillé"
+                    setSound(null, null)
+                }
+                getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            } catch (e: Exception) {
+                Log.e(TAG, "Erreur création canal notification", e)
             }
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
-
-    // ==================== SETUP MESHMANAGER ====================
 
     private fun setupMeshManager() {
         Log.i(TAG, "🔄 Configuration MeshManager")
         try {
-            val id = myId ?: run { isInitializing.set(false); return }
-            val pseudo = myPseudo ?: run { isInitializing.set(false); return }
+            val id = myId ?: run {
+                Log.e(TAG, "myId is null")
+                isInitializing.set(false)
+                return
+            }
+            val pseudo = myPseudo ?: run {
+                Log.e(TAG, "myPseudo is null")
+                isInitializing.set(false)
+                return
+            }
 
-            // Arrêter l'ancien manager si existant (ex: redémarrage du service)
             meshManager?.stop()
             meshManager = null
 
@@ -139,47 +175,67 @@ class MeshService : Service() {
                 myPseudo = pseudo,
                 mode = MeshMode.HYBRID,
                 onStatusUpdate = { status ->
-                    Log.i(TAG, "📡 Status: $status")
-                    sendBroadcast(Intent("MESH_STATUS_CHANGED").apply {
-                        putExtra("status", status)
-                        setPackage(packageName)
-                    })
+                    try {
+                        Log.i(TAG, "📡 Status: $status")
+                        sendBroadcast(Intent("MESH_STATUS_CHANGED").apply {
+                            putExtra("status", status)
+                            setPackage(packageName)
+                        })
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Erreur dans onStatusUpdate", e)
+                    }
                 },
                 onMessageReceived = { chatMsg ->
-                    Log.i(TAG, "📨 Reçu: [${chatMsg.type}] ${chatMsg.sender}: ${chatMsg.content.take(60)}")
-                    sendBroadcast(Intent("MESH_MESSAGE_RECEIVED").apply {
-                        putExtra("id", chatMsg.id)
-                        putExtra("sender", chatMsg.sender)
-                        putExtra("content", chatMsg.content)
-                        putExtra("receiver", chatMsg.receiverId)
-                        putExtra("timestamp", chatMsg.timestamp)
-                        putExtra("type", chatMsg.type.name)
-                        setPackage(packageName)
-                    })
+                    try {
+                        Log.i(TAG, "📨 Reçu: [${chatMsg.type}] ${chatMsg.sender}: ${chatMsg.content.take(60)}")
+                        sendBroadcast(Intent("MESH_MESSAGE_RECEIVED").apply {
+                            putExtra("id", chatMsg.id)
+                            putExtra("sender", chatMsg.sender)
+                            putExtra("content", chatMsg.content)
+                            putExtra("receiver", chatMsg.receiverId)
+                            putExtra("timestamp", chatMsg.timestamp)
+                            putExtra("type", chatMsg.type.name)
+                            setPackage(packageName)
+                        })
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Erreur dans onMessageReceived", e)
+                    }
                 },
                 onNodeDiscovered = { node ->
-                    Log.i(TAG, "✅ Nœud découvert: ${node.pseudo} (${node.deviceId})")
-                    sendBroadcast(Intent("MESH_NODE_DISCOVERED").apply {
-                        putExtra("node_id", node.deviceId)
-                        putExtra("node_name", node.deviceName)
-                        putExtra("node_pseudo", node.pseudo)
-                        putExtra("connection_type", node.connectionType.name)
-                        setPackage(packageName)
-                    })
+                    try {
+                        Log.i(TAG, "✅ Nœud découvert: ${node.pseudo} (${node.deviceId})")
+                        sendBroadcast(Intent("MESH_NODE_DISCOVERED").apply {
+                            putExtra("node_id", node.deviceId)
+                            putExtra("node_name", node.deviceName)
+                            putExtra("node_pseudo", node.pseudo)
+                            putExtra("connection_type", node.connectionType.name)
+                            setPackage(packageName)
+                        })
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Erreur dans onNodeDiscovered", e)
+                    }
                 },
                 onNodeLost = { nodeId ->
-                    Log.i(TAG, "❌ Nœud perdu: $nodeId")
-                    sendBroadcast(Intent("MESH_NODE_LOST").apply {
-                        putExtra("node_id", nodeId)
-                        setPackage(packageName)
-                    })
+                    try {
+                        Log.i(TAG, "❌ Nœud perdu: $nodeId")
+                        sendBroadcast(Intent("MESH_NODE_LOST").apply {
+                            putExtra("node_id", nodeId)
+                            setPackage(packageName)
+                        })
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Erreur dans onNodeLost", e)
+                    }
                 },
                 onError = { error ->
-                    Log.e(TAG, "⚠️ Erreur MeshManager: $error")
-                    sendBroadcast(Intent("MESH_ERROR").apply {
-                        putExtra("error", error)
-                        setPackage(packageName)
-                    })
+                    try {
+                        Log.e(TAG, "⚠️ Erreur MeshManager: $error")
+                        sendBroadcast(Intent("MESH_ERROR").apply {
+                            putExtra("error", error)
+                            setPackage(packageName)
+                        })
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Erreur dans onError", e)
+                    }
                 }
             )
 
@@ -192,7 +248,6 @@ class MeshService : Service() {
             Log.e(TAG, "💥 Erreur setupMeshManager: ${e.message}", e)
             isInitializing.set(false)
             isServiceReady.set(false)
-            // Réessayer après 3 secondes
             handler.postDelayed({
                 if (!isServiceReady.get() && !isInitializing.get()) {
                     Log.i(TAG, "🔄 Nouvelle tentative setupMeshManager")
@@ -202,8 +257,6 @@ class MeshService : Service() {
             }, 3000)
         }
     }
-
-    // ==================== ACTIONS ====================
 
     private fun handleIntentAction(intent: Intent) {
         val action = intent.action ?: return
@@ -253,9 +306,13 @@ class MeshService : Service() {
     }
 
     private fun broadcastTopology() {
-        sendBroadcast(Intent("MESH_TOPOLOGY_UPDATE").apply {
-            putExtra("topology", if (isServiceReady.get()) 1 else 0)
-            setPackage(packageName)
-        })
+        try {
+            sendBroadcast(Intent("MESH_TOPOLOGY_UPDATE").apply {
+                putExtra("topology", if (isServiceReady.get()) 1 else 0)
+                setPackage(packageName)
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur broadcastTopology", e)
+        }
     }
 }

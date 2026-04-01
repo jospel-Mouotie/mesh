@@ -137,11 +137,9 @@ class MeshManager(
 
             registerWifiReceiver()
 
-            // 🔥 SUPPRIMER TOUT GROUPE EXISTANT avant de démarrer
+            // Supprimer tout groupe existant avant de démarrer
             removeOldGroup {
-                // Démarrer la découverte après nettoyage
                 startDiscovery()
-
                 // Devenir Group Owner après 8 secondes si aucune connexion
                 mainHandler.postDelayed({
                     if (isRunning.get() && !isConnectedToGroup && !isConnecting.get() && !isBecomingGO.get()) {
@@ -157,7 +155,6 @@ class MeshManager(
         }
     }
 
-    // Supprime un groupe existant (si présent)
     private fun removeOldGroup(onDone: () -> Unit) {
         if (!checkWifiDirectPermission()) {
             onDone()
@@ -335,7 +332,6 @@ class MeshManager(
 
                 if (devices.isEmpty()) return@requestPeers
 
-                // Si on n'est pas connecté et pas en train de se connecter, on tente la connexion
                 if (!isConnectedToGroup && !isConnecting.get()) {
                     val target = devices.firstOrNull { it.deviceAddress != thisDeviceAddress }
                     if (target != null) {
@@ -360,7 +356,7 @@ class MeshManager(
 
         val config = WifiP2pConfig().apply {
             deviceAddress = device.deviceAddress
-            groupOwnerIntent = 0  // Ce device sera client, l'autre GO
+            groupOwnerIntent = 0
         }
 
         try {
@@ -382,7 +378,6 @@ class MeshManager(
             isConnecting.set(false)
         }
 
-        // Timeout si pas de réponse dans 20 secondes (augmenté)
         mainHandler.postDelayed({
             if (isConnecting.get() && !isConnectedToGroup) {
                 Log.w(TAG, "⏰ Timeout de connexion, réinitialisation")
@@ -592,6 +587,9 @@ class MeshManager(
                 } catch (e: IOException) {
                     if (isRunning.get()) Log.d(TAG, "📴 IO fermée $clientIp: ${e.message}")
                     break
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Erreur inattendue dans la session TCP", e)
+                    break
                 }
             }
         } catch (e: Exception) {
@@ -782,24 +780,35 @@ class MeshManager(
             }
             else -> {
                 if (packet.receiver == "TOUS" || packet.receiver == myId) {
-                    val chatMsg = ChatMessage(
-                        id = packet.id,
-                        sender = packet.senderPseudo,
-                        content = packet.content,
-                        isMine = false,
-                        time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(packet.timestamp)),
-                        status = MessageStatus.RECEIVED,
-                        type = packet.type,
-                        senderIdRaw = packet.senderId,
-                        receiverId = packet.receiver,
-                        timestamp = packet.timestamp,
-                        audioUri = packet.audioData?.let {
-                            val file = File(context.cacheDir, "audio_${packet.id}.3gp")
-                            file.writeBytes(it)
-                            Uri.fromFile(file)
+                    val chatMsg = try {
+                        ChatMessage(
+                            id = packet.id,
+                            sender = packet.senderPseudo,
+                            content = packet.content,
+                            isMine = false,
+                            time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(packet.timestamp)),
+                            status = MessageStatus.RECEIVED,
+                            type = packet.type,
+                            senderIdRaw = packet.senderId,
+                            receiverId = packet.receiver,
+                            timestamp = packet.timestamp,
+                            audioUri = packet.audioData?.let {
+                                val file = File(context.cacheDir, "audio_${packet.id}.3gp")
+                                file.writeBytes(it)
+                                Uri.fromFile(file)
+                            }
+                        )
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Erreur création ChatMessage: ${e.message}", e)
+                        return
+                    }
+                    mainHandler.post {
+                        try {
+                            onMessageReceived(chatMsg)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "❌ Erreur dans onMessageReceived: ${e.message}", e)
                         }
-                    )
-                    mainHandler.post { onMessageReceived(chatMsg) }
+                    }
                 }
                 // Multi-hop relay
                 if (packet.hopCount < MAX_HOP_COUNT) {

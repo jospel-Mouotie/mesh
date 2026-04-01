@@ -67,11 +67,14 @@ class MainActivity : ComponentActivity() {
     private val SuccessGreen = Color(0xFF34A853)
     private val WarningOrange = Color(0xFFFBBC04)
     private val ErrorRed = Color(0xFFEA4335)
+
+    // Flag pour l'enregistrement des récepteurs (nécessaire sur Android 8+)
     private val RECEIVER_FLAG = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         Context.RECEIVER_NOT_EXPORTED
     } else {
         0
     }
+
     // --- State ---
     private val messages = mutableStateListOf<ChatMessage>()
     private val nodes = mutableStateMapOf<String, MeshNode>()
@@ -581,9 +584,8 @@ class MainActivity : ComponentActivity() {
                 if (showNetworkMap) {
                     NetworkTopologyView(modifier = Modifier.padding(paddingValues))
                 } else {
-                    // ⭐ AFFICHER TOUS LES MESSAGES SANS FILTRE POUR LE TEST ⭐
                     ChatView(
-                        messages = messages.toList(),  // Tous les messages
+                        messages = messages.toList(),
                         modifier = Modifier.padding(paddingValues),
                         onPlayAudio = { msg -> playAudio(msg) }
                     )
@@ -861,8 +863,11 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    fun ChatView(messages: List<ChatMessage>, modifier: Modifier = Modifier, onPlayAudio: (ChatMessage) -> Unit) {
-        // ⭐ LOG POUR VOIR LES MESSAGES ⭐
+    fun ChatView(
+        messages: List<ChatMessage>,
+        modifier: Modifier = Modifier,
+        onPlayAudio: (ChatMessage) -> Unit
+    ) {
         Log.d(TAG, "ChatView: ${messages.size} messages à afficher")
         messages.forEach { msg ->
             Log.d(TAG, "  - ${msg.sender}: ${msg.content}")
@@ -871,10 +876,19 @@ class MainActivity : ComponentActivity() {
         if (messages.isEmpty()) {
             Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Rounded.ChatBubbleOutline, contentDescription = null, modifier = Modifier.size(64.dp), tint = Color.Gray.copy(alpha = 0.5f))
+                    Icon(
+                        Icons.Rounded.ChatBubbleOutline,
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp),
+                        tint = Color.Gray.copy(alpha = 0.5f)
+                    )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(text = "Aucun message", color = Color.Gray, fontSize = 16.sp)
-                    Text(text = "Envoyez un message pour commencer", color = Color.Gray.copy(alpha = 0.7f), fontSize = 14.sp)
+                    Text(
+                        text = "Envoyez un message pour commencer",
+                        color = Color.Gray.copy(alpha = 0.7f),
+                        fontSize = 14.sp
+                    )
                 }
             }
         } else {
@@ -882,7 +896,11 @@ class MainActivity : ComponentActivity() {
                 modifier = modifier.fillMaxSize().padding(horizontal = 16.dp),
                 reverseLayout = true
             ) {
-                items(items = messages.reversed(), key = { it.id }) { message ->
+                items(
+                    items = messages.reversed(),
+                    key = { it.id }
+                ) { message ->
+                    // Appel direct du composable – pas de try-catch
                     MessageBubble(msg = message, onPlayAudio = onPlayAudio)
                     Spacer(modifier = Modifier.height(4.dp))
                 }
@@ -914,31 +932,55 @@ class MainActivity : ComponentActivity() {
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     if (!isMine) {
-                        Text(text = msg.sender, color = GeminiBlue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = msg.sender,
+                            color = GeminiBlue,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
 
                     when (msg.type) {
                         PacketType.AUDIO -> {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                                IconButton(onClick = { onPlayAudio(msg) }, modifier = Modifier.size(32.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                IconButton(
+                                    onClick = { onPlayAudio(msg) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
                                     Icon(
                                         if (msg.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                         contentDescription = "Play",
                                         tint = GeminiBlue
                                     )
                                 }
-                                Text(text = "🎤 Message vocal (${msg.content})", color = GhostWhite, fontSize = 14.sp, modifier = Modifier.padding(start = 4.dp))
+                                Text(
+                                    text = "🎤 Message vocal (${msg.content})",
+                                    color = GhostWhite,
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.padding(start = 4.dp)
+                                )
                             }
                         }
                         PacketType.FILE -> {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
                                 Icon(Icons.Rounded.AttachFile, contentDescription = null, tint = GeminiBlue)
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(text = msg.content, color = GhostWhite, fontSize = 14.sp)
                             }
                         }
                         else -> {
-                            Text(text = msg.content, color = GhostWhite, fontSize = 15.sp, modifier = Modifier.padding(top = if (!isMine) 4.dp else 0.dp))
+                            Text(
+                                text = msg.content,
+                                color = GhostWhite,
+                                fontSize = 15.sp,
+                                modifier = Modifier.padding(top = if (!isMine) 4.dp else 0.dp)
+                            )
                         }
                     }
 
@@ -1204,69 +1246,73 @@ class MainActivity : ComponentActivity() {
         }
 
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) { // API 31+
-                registerReceiver(meshReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                registerReceiver(meshReceiver, filter)
-            }
-            Log.d(TAG, "✅ Receivers enregistrés")
+            registerReceiver(meshReceiver, filter, RECEIVER_FLAG)
+            Log.d(TAG, "✅ Receivers enregistrés avec flag $RECEIVER_FLAG")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Erreur d'enregistrement : ${e.message}")
         }
     }
+
     private val meshReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (isDestroyed.get()) return
 
             when (intent?.action) {
                 "MESH_MESSAGE_RECEIVED" -> {
-                    val id = intent.getStringExtra("id") ?: return
-                    val sender = intent.getStringExtra("sender") ?: "Inconnu"
-                    val content = intent.getStringExtra("content") ?: ""
-                    val receiver = intent.getStringExtra("receiver") ?: "TOUS"
-                    val timestamp = intent.getLongExtra("timestamp", System.currentTimeMillis())
-                    val typeStr = intent.getStringExtra("type") ?: "MESSAGE"
-                    val audioData = intent.getByteArrayExtra("audio_data")
+                    try {
+                        val id = intent.getStringExtra("id") ?: return
+                        val sender = intent.getStringExtra("sender") ?: "Inconnu"
+                        val content = intent.getStringExtra("content") ?: ""
+                        val receiver = intent.getStringExtra("receiver") ?: "TOUS"
+                        val timestamp = intent.getLongExtra("timestamp", System.currentTimeMillis())
+                        val typeStr = intent.getStringExtra("type") ?: "MESSAGE"
+                        val audioData = intent.getByteArrayExtra("audio_data")
 
-                    val type = try { PacketType.valueOf(typeStr) } catch (e: Exception) { PacketType.MESSAGE }
+                        val type = try { PacketType.valueOf(typeStr) } catch (e: Exception) { PacketType.MESSAGE }
 
-                    val sId = sender.substringAfterLast("(").substringBefore(")")
+                        val sId = sender.substringAfterLast("(").substringBefore(")")
 
-                    if (!nodes.containsKey(sId) && sId.isNotEmpty()) {
-                        nodes[sId] = MeshNode(
-                            deviceId = sId,
-                            deviceName = "Appareil",
-                            pseudo = sender.substringBefore(" ("),
-                            connectionType = ConnectionType.BLUETOOTH,
-                            lastSeen = System.currentTimeMillis()
+                        if (!nodes.containsKey(sId) && sId.isNotEmpty()) {
+                            nodes[sId] = MeshNode(
+                                deviceId = sId,
+                                deviceName = "Appareil",
+                                pseudo = sender.substringBefore(" ("),
+                                connectionType = ConnectionType.BLUETOOTH,
+                                lastSeen = System.currentTimeMillis()
+                            )
+                        }
+
+                        val message = ChatMessage(
+                            id = id,
+                            sender = nodes[sId]?.pseudo ?: sender.substringBefore(" ("),
+                            content = content,
+                            isMine = false,
+                            time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp)),
+                            status = MessageStatus.RECEIVED,
+                            type = type,
+                            senderIdRaw = sId,
+                            receiverId = receiver,
+                            timestamp = timestamp,
+                            audioUri = if (audioData != null) {
+                                val file = File(cacheDir, "audio_${id}.3gp")
+                                file.writeBytes(audioData)
+                                Uri.fromFile(file)
+                            } else null
                         )
+
+                        try {
+                            messages.add(message)
+                            Log.d(TAG, "📨 Message AJOUTÉ à l'UI: ${message.content} (total: ${messages.size} messages)")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Erreur lors de l'ajout du message", e)
+                        }
+
+                        showMessageNotification(message)
+
+                        if (messages.size > 200) messages.removeAt(0)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Erreur traitement MESH_MESSAGE_RECEIVED", e)
                     }
-
-                    val message = ChatMessage(
-                        id = id,
-                        sender = nodes[sId]?.pseudo ?: sender.substringBefore(" ("),
-                        content = content,
-                        isMine = false,
-                        time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp)),
-                        status = MessageStatus.RECEIVED,
-                        type = type,
-                        senderIdRaw = sId,
-                        receiverId = receiver,
-                        timestamp = timestamp,
-                        audioUri = if (audioData != null) {
-                            val file = File(cacheDir, "audio_${id}.3gp")
-                            file.writeBytes(audioData)
-                            Uri.fromFile(file)
-                        } else null
-                    )
-
-                    // ⭐ AJOUTER LE MESSAGE ET LOGGER ⭐
-                    messages.add(message)
-                    Log.d(TAG, "📨 Message AJOUTÉ à l'UI: ${message.content} (total: ${messages.size} messages)")
-
-                    showMessageNotification(message)
-
-                    if (messages.size > 200) messages.removeAt(0)
                 }
 
                 "MESH_STATUS_CHANGED" -> {
@@ -1276,20 +1322,24 @@ class MainActivity : ComponentActivity() {
                 }
 
                 "MESH_NODE_DISCOVERED" -> {
-                    val nodeId = intent.getStringExtra("node_id") ?: return
-                    val nodeName = intent.getStringExtra("node_name") ?: "Inconnu"
-                    val nodePseudo = intent.getStringExtra("node_pseudo") ?: "Anonyme"
-                    val connectionTypeStr = intent.getStringExtra("connection_type") ?: "BLUETOOTH"
-                    val connectionType = try { ConnectionType.valueOf(connectionTypeStr) } catch (e: Exception) { ConnectionType.BLUETOOTH }
+                    try {
+                        val nodeId = intent.getStringExtra("node_id") ?: return
+                        val nodeName = intent.getStringExtra("node_name") ?: "Inconnu"
+                        val nodePseudo = intent.getStringExtra("node_pseudo") ?: "Anonyme"
+                        val connectionTypeStr = intent.getStringExtra("connection_type") ?: "BLUETOOTH"
+                        val connectionType = try { ConnectionType.valueOf(connectionTypeStr) } catch (e: Exception) { ConnectionType.BLUETOOTH }
 
-                    nodes[nodeId] = MeshNode(
-                        deviceId = nodeId,
-                        deviceName = nodeName,
-                        pseudo = nodePseudo,
-                        connectionType = connectionType,
-                        lastSeen = System.currentTimeMillis()
-                    )
-                    Log.d(TAG, "✅ Noeud découvert: $nodePseudo ($nodeId)")
+                        nodes[nodeId] = MeshNode(
+                            deviceId = nodeId,
+                            deviceName = nodeName,
+                            pseudo = nodePseudo,
+                            connectionType = connectionType,
+                            lastSeen = System.currentTimeMillis()
+                        )
+                        Log.d(TAG, "✅ Noeud découvert: $nodePseudo ($nodeId)")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Erreur traitement MESH_NODE_DISCOVERED", e)
+                    }
                 }
 
                 "MESH_NODE_LOST" -> {
@@ -1479,6 +1529,7 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
     private fun sendAudioMessage(audioFile: File, receiver: String) {
         val id = UUID.randomUUID().toString()
         val currentTime = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
