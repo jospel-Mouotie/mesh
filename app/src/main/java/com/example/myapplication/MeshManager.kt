@@ -11,9 +11,14 @@ import android.net.wifi.p2p.*
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonDeserializer
+import com.google.gson.JsonPrimitive
+import com.google.gson.JsonSerializer
 import java.io.*
 import java.net.*
 import java.text.SimpleDateFormat
@@ -34,7 +39,16 @@ class MeshManager(
     private val onNodeLost: (String) -> Unit,
     private val onError: (String) -> Unit
 ) {
-    private val gson = Gson()
+    // Gson avec adaptateur Base64 pour ByteArray
+    private val gson: Gson = GsonBuilder()
+        .registerTypeAdapter(ByteArray::class.java, JsonSerializer<ByteArray> { src, _, _ ->
+            JsonPrimitive(Base64.encodeToString(src, Base64.NO_WRAP))
+        })
+        .registerTypeAdapter(ByteArray::class.java, JsonDeserializer { json, _, _ ->
+            Base64.decode(json.asString, Base64.NO_WRAP)
+        })
+        .create()
+
     private val TAG = "MeshManager"
     private val TCP_PORT = 8888
     private val MAX_HOP_COUNT = 7
@@ -57,7 +71,6 @@ class MeshManager(
     private var isConnectedToGroup = false
     private var receiverRegistered = false
 
-    // Flags atomiques
     private val isConnecting = AtomicBoolean(false)
     private val tcpConnectInProgress = AtomicBoolean(false)
     private val isBecomingGO = AtomicBoolean(false)
@@ -79,7 +92,6 @@ class MeshManager(
     private val myIp: String by lazy { getLocalIpAddress() }
 
     // ==================== DÉMARRAGE ====================
-
     fun startMesh() {
         try {
             Log.i(TAG, "==========================================")
@@ -113,7 +125,6 @@ class MeshManager(
     }
 
     // ==================== WIFI DIRECT ====================
-
     private fun startWifiDirect() {
         if (!checkWifiDirectPermission()) {
             Log.e(TAG, "❌ Permission WiFi Direct manquante")
@@ -128,25 +139,21 @@ class MeshManager(
                 object : WifiP2pManager.ChannelListener {
                     override fun onChannelDisconnected() {
                         Log.w(TAG, "⚠️ Channel WiFi Direct déconnecté")
-                        if (isRunning.get()) {
-                            mainHandler.postDelayed({ restartWifiDirect() }, 3000)
-                        }
                     }
                 }
             )
 
             registerWifiReceiver()
 
-            // Supprimer tout groupe existant avant de démarrer
             removeOldGroup {
                 startDiscovery()
-                // Devenir Group Owner après 8 secondes si aucune connexion
+                // Délai de sécurité pour laisser le temps aux pairs de se découvrir
                 mainHandler.postDelayed({
                     if (isRunning.get() && !isConnectedToGroup && !isConnecting.get() && !isBecomingGO.get()) {
-                        Log.i(TAG, "⏱️ Aucun pair après 8s → je deviens Group Owner")
+                        Log.i(TAG, "⏱️ Aucun pair trouvé après 10s → je deviens Group Owner")
                         becomeGroupOwner()
                     }
-                }, 8000)
+                }, 10000)
             }
 
         } catch (e: Exception) {
@@ -184,22 +191,6 @@ class MeshManager(
         }
     }
 
-    private fun restartWifiDirect() {
-        if (!isRunning.get()) return
-        Log.i(TAG, "🔄 Redémarrage WiFi Direct")
-        if (receiverRegistered) {
-            try { context.unregisterReceiver(wifiDirectReceiver) } catch (e: Exception) { }
-            receiverRegistered = false
-        }
-        isConnectedToGroup = false
-        isGroupOwner = false
-        groupOwnerIp = null
-        isConnecting.set(false)
-        isBecomingGO.set(false)
-        tcpConnectInProgress.set(false)
-        startWifiDirect()
-    }
-
     private fun registerWifiReceiver() {
         if (receiverRegistered) return
         val filter = IntentFilter().apply {
@@ -230,7 +221,7 @@ class MeshManager(
                 }
                 override fun onFailure(reason: Int) {
                     Log.w(TAG, "⚠️ discoverPeers: $reason ${reasonToString(reason)}")
-                    if (reason != 2) { // 2 = BUSY
+                    if (reason != 2) {
                         mainHandler.postDelayed({
                             if (isRunning.get() && !isConnectedToGroup) startDiscovery()
                         }, 5000)
@@ -252,6 +243,7 @@ class MeshManager(
             wifiP2pManager?.createGroup(channel, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     Log.i(TAG, "✅ Groupe créé — je suis Group Owner")
+                    isBecomingGO.set(false)
                 }
                 override fun onFailure(reason: Int) {
                     Log.e(TAG, "❌ createGroup échoué: $reason ${reasonToString(reason)}")
@@ -268,7 +260,6 @@ class MeshManager(
     }
 
     // ==================== BROADCAST RECEIVER ====================
-
     private val wifiDirectReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             when (intent.action) {
@@ -332,11 +323,28 @@ class MeshManager(
 
                 if (devices.isEmpty()) return@requestPeers
 
+                // Filtrer : enlever l'imprimante HP et soi-même
+                val validPeers = devices.filter {
+                    it.deviceName != null &&
+                            !it.deviceName.contains("HP DeskJet", ignoreCase = true) &&
+                            it.deviceAddress != thisDeviceAddress
+                }
+
+                if (validPeers.isEmpty()) {
+                    Log.i(TAG, "📭 Aucun pair valide (ignoré: ${devices.map { it.deviceName }})")
+                    return@requestPeers
+                }
+
                 if (!isConnectedToGroup && !isConnecting.get()) {
-                    val target = devices.firstOrNull { it.deviceAddress != thisDeviceAddress }
-                    if (target != null) {
-                        Log.i(TAG, "📱 Connexion à: ${target.deviceName} (${target.deviceAddress})")
-                        connectToPeer(target)
+                    val sorted = validPeers.sortedBy { it.deviceAddress }
+                    val myAddr = thisDeviceAddress
+                    val shouldBeGO = myAddr != null && myAddr < sorted.first().deviceAddress
+                    if (shouldBeGO) {
+                        Log.i(TAG, "👑 Je deviens GO (mon adresse $myAddr < ${sorted.first().deviceAddress})")
+                        if (!isGroupOwner && !isBecomingGO.get()) becomeGroupOwner()
+                    } else {
+                        Log.i(TAG, "📱 Je me connecte au pair ${sorted.first().deviceName}")
+                        connectToPeer(sorted.first())
                     }
                 } else {
                     Log.d(TAG, "Connexion ignorée (connecté=$isConnectedToGroup, connecting=${isConnecting.get()})")
@@ -447,7 +455,6 @@ class MeshManager(
     }
 
     // ==================== CONNEXION TCP AU GROUP OWNER ====================
-
     private fun connectToGroupOwnerTcp() {
         if (!isRunning.get() || isGroupOwner) return
         if (tcpConnectInProgress.getAndSet(true)) {
@@ -497,7 +504,6 @@ class MeshManager(
     }
 
     // ==================== SERVEUR TCP ====================
-
     private fun startTcpServer() {
         executor.execute {
             val port = try {
@@ -534,7 +540,6 @@ class MeshManager(
     }
 
     // ==================== GESTION D'UNE SESSION TCP ====================
-
     private fun handleTcpConnection(socket: Socket, clientIp: String) {
         var nodeId: String? = null
         try {
@@ -619,8 +624,7 @@ class MeshManager(
                 receiver = "TOUS",
                 content = "HELLO:$myPseudo",
                 type = PacketType.NODE_INFO,
-                timestamp = System.currentTimeMillis(),
-                tcpPort = TCP_PORT
+                timestamp = System.currentTimeMillis()
             )
             writer.println(gson.toJson(packet))
             writer.flush()
@@ -631,7 +635,6 @@ class MeshManager(
     }
 
     // ==================== NŒUDS ====================
-
     private fun updateNodeInfo(nodeId: String, pseudo: String, ip: String, isDirectNeighbor: Boolean) {
         val existing = knownNodes[nodeId]
         if (existing != null) {
@@ -656,7 +659,9 @@ class MeshManager(
                 pseudo = pseudo,
                 connectionType = ConnectionType.WIFI_DIRECT,
                 lastSeen = System.currentTimeMillis(),
-                isDirectConnection = isDirectNeighbor
+                isDirectConnection = isDirectNeighbor,
+                ip = ip,
+                isConnected = true
             )
             mainHandler.post {
                 onNodeDiscovered(meshNode)
@@ -666,7 +671,6 @@ class MeshManager(
     }
 
     // ==================== HEARTBEAT ====================
-
     private fun startHeartbeat() {
         heartbeatExecutor.scheduleAtFixedRate({
             if (isRunning.get()) {
@@ -690,8 +694,7 @@ class MeshManager(
             content = "HEARTBEAT",
             type = PacketType.HEARTBEAT,
             hopCount = 0,
-            timestamp = System.currentTimeMillis(),
-            tcpPort = TCP_PORT
+            timestamp = System.currentTimeMillis()
         )
         val data = (gson.toJson(packet) + "\n").toByteArray(Charsets.UTF_8)
 
@@ -740,7 +743,6 @@ class MeshManager(
     }
 
     // ==================== ENVOI ====================
-
     fun sendPacket(packet: MeshPacket) {
         if (tcpConnections.isEmpty()) {
             Log.w(TAG, "⚠️ Aucune connexion TCP")
@@ -762,8 +764,7 @@ class MeshManager(
         }
     }
 
-    // ==================== RÉCEPTION ====================
-
+    // ==================== RÉCEPTION (avec sauvegarde des fichiers) ====================
     private fun handleIncomingPacket(packet: MeshPacket, sourceIp: String) {
         if (seenPacketIds.contains(packet.id)) return
         seenPacketIds.add(packet.id)
@@ -780,37 +781,63 @@ class MeshManager(
             }
             else -> {
                 if (packet.receiver == "TOUS" || packet.receiver == myId) {
-                    val chatMsg = try {
-                        ChatMessage(
-                            id = packet.id,
-                            sender = packet.senderPseudo,
-                            content = packet.content,
-                            isMine = false,
-                            time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(packet.timestamp)),
-                            status = MessageStatus.RECEIVED,
-                            type = packet.type,
-                            senderIdRaw = packet.senderId,
-                            receiverId = packet.receiver,
-                            timestamp = packet.timestamp,
-                            audioUri = packet.audioData?.let {
-                                val file = File(context.cacheDir, "audio_${packet.id}.3gp")
-                                file.writeBytes(it)
-                                Uri.fromFile(file)
-                            }
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "❌ Erreur création ChatMessage: ${e.message}", e)
-                        return
-                    }
-                    mainHandler.post {
+                    var audioPath: String? = null
+                    var filePath: String? = null
+
+                    // Sauvegarde audio
+                    packet.audioData?.let { data ->
                         try {
-                            onMessageReceived(chatMsg)
+                            val audioFile = File(context.cacheDir, "audio_${packet.id}.3gp")
+                            audioFile.writeBytes(data)
+                            if (audioFile.exists() && audioFile.length() > 0) {
+                                audioPath = audioFile.absolutePath
+                                Log.i(TAG, "✅ Audio sauvegardé: $audioPath (${data.size} bytes)")
+                            } else {
+                                Log.e(TAG, "❌ Échec sauvegarde audio")
+                            }
                         } catch (e: Exception) {
-                            Log.e(TAG, "❌ Erreur dans onMessageReceived: ${e.message}", e)
+                            Log.e(TAG, "Erreur sauvegarde audio", e)
                         }
                     }
+
+                    // Sauvegarde fichier
+                    packet.fileData?.let { data ->
+                        try {
+                            val fileName = packet.fileName ?: "file_${packet.id}"
+                            val file = File(context.cacheDir, fileName)
+                            file.writeBytes(data)
+                            if (file.exists() && file.length() > 0) {
+                                filePath = file.absolutePath
+                                Log.i(TAG, "✅ Fichier sauvegardé: $filePath (${data.size} bytes)")
+                            } else {
+                                Log.e(TAG, "❌ Échec sauvegarde fichier")
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Erreur sauvegarde fichier", e)
+                        }
+                    }
+
+                    val chatMsg = ChatMessage(
+                        id = packet.id,
+                        sender = packet.senderPseudo,
+                        content = packet.content,
+                        isMine = false,
+                        time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(packet.timestamp)),
+                        status = MessageStatus.RECEIVED,
+                        type = packet.type,
+                        receiverId = packet.receiver,
+                        senderIdRaw = packet.senderId,
+                        timestamp = packet.timestamp,
+                        audioPath = audioPath,
+                        filePath = filePath,
+                        fileName = packet.fileName,
+                        fileSize = packet.fileSize
+                    )
+                    mainHandler.post {
+                        onMessageReceived(chatMsg)
+                    }
                 }
-                // Multi-hop relay
+                // Relay multi-sauts
                 if (packet.hopCount < MAX_HOP_COUNT) {
                     sendPacket(packet.copy(hopCount = packet.hopCount + 1))
                 }
@@ -819,7 +846,6 @@ class MeshManager(
     }
 
     // ==================== UTILITAIRES ====================
-
     private fun checkWifiDirectPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ContextCompat.checkSelfPermission(
@@ -858,7 +884,6 @@ class MeshManager(
     }
 
     // ==================== ARRÊT ====================
-
     fun stop() {
         Log.i(TAG, "🛑 Arrêt MeshManager")
         isRunning.set(false)

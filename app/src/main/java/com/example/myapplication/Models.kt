@@ -1,105 +1,132 @@
 package com.example.myapplication
 
 import android.net.Uri
-import java.util.Date
+import java.util.*
 
-// 1. Statut de l'envoi pour l'UI
+// ==================== ENUMS ====================
+
 enum class MessageStatus {
-    SENDING,
-    SENT,
-    RECEIVED,
-    FAILED
+    SENDING, SENT, RECEIVED, FAILED, RELAYED
 }
 
-// 2. Types de paquets
 enum class PacketType {
-    MESSAGE,
-    ACK,
-    HEARTBEAT,
-    AUDIO,
-    FILE,
-    NODE_INFO
+    MESSAGE, AUDIO, FILE, HEARTBEAT, NODE_INFO, ACK,
+    ROUTE_UPDATE, GO_HEARTBEAT,
+    TEST_REACHABILITY, CAN_REACH, BECOME_RELAY, GROUP_DISSOLVE,
+    RELAY_REGISTER, RELAY_UNREGISTER, GO_TO_GO_PEERING, GO_TO_GO_ACCEPT, HIERARCHY_MERGE
 }
 
-// 3. Modèle pour l'UI
+enum class MeshMode { BLUETOOTH, WIFI_DIRECT, HYBRID }
+enum class ConnectionType { WIFI_DIRECT, BLUETOOTH, RELAY_BRIDGE, SUB_GO }
+
+// ==================== PAQUET RÉSEAU ====================
+
+data class MeshPacket(
+    val id: String = UUID.randomUUID().toString(),
+    val senderId: String,
+    val senderPseudo: String,
+    val receiver: String,
+    val content: String,
+    val type: PacketType,
+    var hopCount: Int = 10,
+    val timestamp: Long = System.currentTimeMillis(),
+    val sourceGroupId: String = "",
+    val viaBle: Boolean = false,
+    val audioData: ByteArray? = null,
+    val fileData: ByteArray? = null,
+    val fileName: String? = null,
+    val fileSize: Long = 0,
+    val routeEntries: List<RoutingEntry>? = null,
+    val targetGoAddress: String? = null,
+    val canReachResult: Boolean? = null,
+    val reachabilityQuality: Double? = null,
+    val relayForClients: List<String>? = null,
+    val newGoInfo: GoInfo? = null,
+    val relayInfo: RelayInfo? = null,
+    val hierarchyInfo: HierarchyInfo? = null
+) {
+    override fun equals(other: Any?): Boolean = other is MeshPacket && id == other.id
+    override fun hashCode(): Int = id.hashCode()
+}
+
+data class GoInfo(val goId: String, val goPseudo: String, val goAddress: String, val goPriority: Long, val clientCount: Int)
+data class RelayInfo(val relayId: String, val relayAddress: String, val relayPseudo: String, val relayBleAddress: String?, val supportedClients: List<String>)
+data class HierarchyInfo(val superGoId: String, val superGoAddress: String, val subGroupId: String, val isSubGo: Boolean = false)
+
+// ==================== ROUTAGE BAYÉSIEN ====================
+
+data class RoutingEntry(
+    val destinationId: String,
+    val nextHopId: String,
+    var alpha: Double = 1.0,
+    var beta: Double = 1.0,
+    var latency: Double = 0.0,
+    var timestamp: Long = System.currentTimeMillis(),
+    var isRelayLink: Boolean = false
+) {
+    val reliability: Double get() = if (alpha + beta > 0) alpha / (alpha + beta) else 0.5
+    fun toThompsonSample(): Double = sampleBeta(Random(), alpha, beta)
+    private fun sampleBeta(random: Random, a: Double, b: Double): Double {
+        if (a <= 0 || b <= 0) return 0.5
+        val ga = sampleGamma(random, a, 1.0)
+        val gb = sampleGamma(random, b, 1.0)
+        return if (ga + gb > 0) ga / (ga + gb) else 0.5
+    }
+    private fun sampleGamma(random: Random, shape: Double, scale: Double): Double {
+        if (shape < 1) return sampleGamma(random, shape + 1, scale) * Math.pow(random.nextDouble(), 1.0 / shape)
+        val d = shape - 1.0 / 3.0
+        val c = 1.0 / Math.sqrt(9.0 * d)
+        while (true) {
+            val x = random.nextGaussian()
+            val v = Math.pow(1.0 + c * x, 3.0)
+            if (v > 0) {
+                val u = random.nextDouble()
+                if (u < 1.0 - 0.0331 * x * x * x * x) return d * v * scale
+                if (Math.log(u) < 0.5 * x * x + d * (1.0 - v + Math.log(v))) return d * v * scale
+            }
+        }
+    }
+}
+
+// ==================== NŒUD POUR L’UI ====================
+
+data class MeshNode(
+    val deviceId: String,
+    val deviceName: String,
+    val pseudo: String,
+    val connectionType: ConnectionType,
+    val lastSeen: Long,
+    val isDirectConnection: Boolean = false,
+    var estimatedDistance: Float = 0f,
+    val groupId: String = "",
+    val bayesianReliability: Double = 0.5,
+    val isRelay: Boolean = false,
+    val relayFor: List<String> = emptyList(),
+    val isSubGo: Boolean = false,
+    val superGoId: String? = null,
+    val batteryLevel: Int = 100,
+    val ip: String? = null,
+    val isConnected: Boolean = true
+)
+
+// ==================== MESSAGE POUR L’UI ====================
+// Dans Models.kt, modifiez ChatMessage comme suit :
 data class ChatMessage(
     val id: String,
     val sender: String,
     val content: String,
     val isMine: Boolean,
     val time: String,
-    val status: MessageStatus,
-    val type: PacketType = PacketType.MESSAGE,
-    val audioUri: Uri? = null,
-    var isPlaying: Boolean = false,
-    val receiverId: String = "TOUS",
-    val senderIdRaw: String = "",
-    val timestamp: Long = System.currentTimeMillis()
-)
-
-// 4. Modèle pour le transport Réseau
-data class MeshPacket(
-    val id: String,
-    val senderId: String,
-    val senderPseudo: String,
-    val receiver: String,
-    val content: String,
-    val type: PacketType = PacketType.MESSAGE,
-    val audioData: ByteArray? = null,
-    val fileData: ByteArray? = null,
-    val fileName: String? = null,
-    val hopCount: Int = 0,
+    var status: MessageStatus,
+    val type: PacketType,
+    val receiverId: String,
+    val senderIdRaw: String,
     val timestamp: Long = System.currentTimeMillis(),
-    val tcpPort: Int = 8888  // Port TCP fixe pour tous
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (javaClass != other?.javaClass) return false
-
-        other as MeshPacket
-
-        if (id != other.id) return false
-        if (senderId != other.senderId) return false
-        if (timestamp != other.timestamp) return false
-
-        return true
-    }
-
-    override fun hashCode(): Int {
-        var result = id.hashCode()
-        result = 31 * result + senderId.hashCode()
-        result = 31 * result + timestamp.hashCode()
-        return result
-    }
-}
-
-// 5. Modes de connexion
-enum class MeshMode {
-    BLUETOOTH,
-    WIFI_DIRECT,
-    HYBRID
-}
-
-// 6. Modèle pour les noeuds du réseau
-data class MeshNode(
-    val deviceId: String,
-    val deviceName: String,
-    val pseudo: String,
-    val lastSeen: Long = System.currentTimeMillis(),
-    val connectionType: ConnectionType,
-    val isDirectConnection: Boolean = false,
-    var isConnected: Boolean = false
-)
-
-enum class ConnectionType {
-    BLUETOOTH,
-    WIFI_DIRECT,
-    WIFI_AWARE,
-    MULTIPLE
-}
-
-// 7. Modèle pour la topologie du réseau
-data class NetworkTopology(
-    val nodes: Map<String, MeshNode>,
-    val connections: List<Pair<String, String>>
+    val audioPath: String? = null,
+    val filePath: String? = null,
+    val fileName: String? = null,
+    val fileSize: Long = 0,
+    var isPlaying: Boolean = false,
+    val replyToId: String? = null,        // Ajouté
+    val replyToContent: String? = null    // Ajouté
 )

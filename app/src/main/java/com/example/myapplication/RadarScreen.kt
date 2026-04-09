@@ -1,187 +1,491 @@
 package com.example.myapplication
 
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Radar
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.math.pow
 
+// ==================== COULEURS RADAR ====================
+private val RadarBg        = Color(0xFF060B14)
+private val RadarBlue      = Color(0xFF1A73E8)
+private val RadarGreen     = Color(0xFF00E676)
+private val RadarAmber     = Color(0xFFFFAB40)
+private val RadarRed       = Color(0xFFFF5252)
+private val RadarCyan      = Color(0xFF18FFFF)
+private val RadarSurface   = Color(0xFF0D1B2A)
+private val RadarPurple    = Color(0xFFAA00FF)
+private val RadarOrange    = Color(0xFFFF6D00)
+
+// ==================== RADAR SCREEN ====================
 @Composable
 fun RadarScreen(
     knownNodes: Map<String, MeshNode>,
     myPseudo: String,
-    onClose: () -> Unit,
-    bayesianScores: Map<String, Float> = emptyMap()
+    onClose: () -> Unit
 ) {
-    var rotationAngle by remember { mutableStateOf(0f) }
+    val neighbors = knownNodes.values.toList()
+    val activeNodes = neighbors.filter { System.currentTimeMillis() - it.lastSeen < 30000 }
+    val wifiNodes = activeNodes.filter { it.connectionType == ConnectionType.WIFI_DIRECT }
+    val bleNodes = activeNodes.filter { it.connectionType == ConnectionType.BLUETOOTH }
+    val relayNodes = activeNodes.filter { it.isRelay }
+    val subGoNodes = activeNodes.filter { it.isSubGo }
 
-    LaunchedEffect(Unit) {
-        while (true) {
-            rotationAngle = (rotationAngle + 2) % 360
-            kotlinx.coroutines.delay(16)
-        }
-    }
+    val sweepAngle by rememberInfiniteTransition(label = "sweep").animateFloat(
+        initialValue = 0f, targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(3000, easing = LinearEasing)),
+        label = "sweep_angle"
+    )
 
-    fun isNodeActive(node: MeshNode): Boolean {
-        return System.currentTimeMillis() - node.lastSeen < 30000
-    }
+    val pingScale by rememberInfiniteTransition(label = "ping").animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(2000, easing = FastOutSlowInEasing)),
+        label = "ping_scale"
+    )
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(RadarBg)
+            .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("RADAR DE TOPOLOGIE", fontSize = 20.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, color = Color(0xFF1A73E8))
-        Text("Nœuds détectés : ${knownNodes.size - 1}", fontSize = 14.sp, color = Color.Gray)
-        Spacer(modifier = Modifier.height(16.dp))
+        // ===== EN-TÊTE =====
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    "RADAR RÉSEAU",
+                    fontSize = 18.sp, fontWeight = FontWeight.Bold, color = RadarCyan
+                )
+                Text(
+                    "📡 WiFi:${wifiNodes.size}  🔵 BLE:${bleNodes.size}  🔁 Relais:${relayNodes.size}  🏛️ Sous-GO:${subGoNodes.size}",
+                    fontSize = 12.sp, color = Color.Gray
+                )
+            }
+            IconButton(onClick = onClose) {
+                Icon(Icons.Rounded.Close, contentDescription = "Fermer", tint = Color.Gray)
+            }
+        }
 
-        Box(modifier = Modifier.size(350.dp).padding(8.dp), contentAlignment = Alignment.Center) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val centerX = size.width / 2
-                val centerY = size.height / 2
-                val maxRadius = size.width / 2 - 20
+        Spacer(modifier = Modifier.height(8.dp))
 
-                drawCircle(Color(0xFF1A73E8).copy(alpha = 0.3f), maxRadius, Offset(centerX, centerY), style = Stroke(width = 2f))
+        // ===== RADAR CANVAS =====
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(CircleShape)
+                .background(RadarSurface),
+            contentAlignment = Alignment.Center
+        ) {
+            androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
+                val cx = size.width / 2f
+                val cy = size.height / 2f
+                val maxR = size.width / 2f - 8f
+                val maxDistance = 100f  // distance maximale affichée (mètres)
 
-                for (i in 1..5) {
-                    val radius = maxRadius * i / 5
-                    drawCircle(Color.Gray.copy(alpha = 0.3f), radius, Offset(centerX, centerY), style = Stroke(width = 1f))
-                    drawContext.canvas.nativeCanvas.apply {
-                        val paint = android.graphics.Paint().apply { color = android.graphics.Color.GRAY; textSize = 20f; textAlign = android.graphics.Paint.Align.CENTER }
-                        drawText("${i * 10}m", centerX + radius, centerY + 10f, paint)
+                // Fond circulaire
+                drawCircle(RadarBg, maxR, Offset(cx, cy))
+
+                // Cercles concentriques (25m, 50m, 75m, 100m)
+                for (i in 1..4) {
+                    val r = maxR * i / 4f
+                    drawCircle(
+                        color = RadarBlue.copy(alpha = 0.15f),
+                        radius = r, center = Offset(cx, cy),
+                        style = Stroke(1f)
+                    )
+                }
+
+                // Lignes radiales
+                for (deg in 0..315 step 45) {
+                    val rad = Math.toRadians(deg.toDouble())
+                    drawLine(
+                        color = RadarBlue.copy(alpha = 0.2f),
+                        start = Offset(cx, cy),
+                        end = Offset(cx + maxR * cos(rad).toFloat(), cy + maxR * sin(rad).toFloat()),
+                        strokeWidth = 0.8f
+                    )
+                }
+
+                // Balayage rotatif
+                rotate(sweepAngle, Offset(cx, cy)) {
+                    drawLine(
+                        color = RadarGreen.copy(alpha = 0.9f),
+                        start = Offset(cx, cy),
+                        end = Offset(cx + maxR, cy),
+                        strokeWidth = 2f
+                    )
+                    for (trail in 1..6) {
+                        val trailAngle = -trail * 6f
+                        val alpha = (1f - trail / 7f) * 0.5f
+                        rotate(trailAngle, Offset(cx, cy)) {
+                            drawLine(
+                                color = RadarGreen.copy(alpha = alpha),
+                                start = Offset(cx, cy),
+                                end = Offset(cx + maxR, cy),
+                                strokeWidth = 1.5f
+                            )
+                        }
                     }
                 }
 
-                for (angle in 0..315 step 45) {
-                    val radians = Math.toRadians(angle.toDouble())
-                    val endX = centerX + maxRadius * cos(radians).toFloat()
-                    val endY = centerY + maxRadius * sin(radians).toFloat()
-                    drawLine(Color.Gray.copy(alpha = 0.5f), Offset(centerX, centerY), Offset(endX, endY), 1f)
-                }
+                // Anneau de pulsation central
+                drawCircle(
+                    color = RadarGreen.copy(alpha = (1f - pingScale) * 0.4f),
+                    radius = maxR * pingScale * 0.15f,
+                    center = Offset(cx, cy),
+                    style = Stroke(1.5f)
+                )
 
-                rotate(rotationAngle, Offset(centerX, centerY)) {
-                    drawLine(Color(0xFF1A73E8), Offset(centerX, centerY), Offset(centerX + maxRadius, centerY), 3f)
-                }
-
-                drawCircle(Color(0xFF1A73E8), 12f, Offset(centerX, centerY))
-                drawContext.canvas.nativeCanvas.apply {
-                    val paint = android.graphics.Paint().apply { color = android.graphics.Color.WHITE; textSize = 24f; textAlign = android.graphics.Paint.Align.CENTER; isFakeBoldText = true }
-                    drawText("MOI", centerX, centerY + 8f, paint)
-                }
-
-                val nodesList = knownNodes.values.filter { it.deviceId != myPseudo }.toList()
-                val nodeCount = nodesList.size
-
+                // ===== AFFICHAGE DES NŒUDS =====
+                val nodeCount = neighbors.size
                 if (nodeCount > 0) {
-                    nodesList.forEachIndexed { index, node ->
-                        val radius = maxRadius * 0.6f
-                        val angle = if (nodeCount > 1) (360.0 / nodeCount * index).toFloat() else 0f
-                        val radians = Math.toRadians(angle.toDouble())
-                        val x = centerX + radius * cos(radians).toFloat()
-                        val y = centerY + radius * sin(radians).toFloat()
-                        val isActive = isNodeActive(node)
-                        val score = bayesianScores[node.deviceId] ?: 0.5f
-                        val nodeColor = Color(red = (1f - score).coerceIn(0f, 1f), green = score.coerceIn(0f, 1f), blue = 0.2f, alpha = if (isActive) 0.8f else 0.3f)
-                        val circleRadius = if (isActive) 18f else 14f
-                        drawCircle(nodeColor, circleRadius, Offset(x, y))
+                    neighbors.forEachIndexed { index, node ->
+                        val isActive = System.currentTimeMillis() - node.lastSeen < 30000
+                        // Éviter d'afficher 0 m (distance par défaut)
+                        val rawDistance = node.estimatedDistance.coerceIn(1f, maxDistance)
+                        val normalizedDistance = rawDistance / maxDistance
+                        val r = maxR * normalizedDistance
+                        val angleDeg = if (nodeCount > 1) 360f / nodeCount * index else 0f
+                        val rad = Math.toRadians(angleDeg.toDouble())
+                        val nx = cx + r * cos(rad).toFloat()
+                        val ny = cy + r * sin(rad).toFloat()
+
+                        val score = node.bayesianReliability.toFloat()
+                        val nodeColor = when {
+                            !isActive -> Color.Gray.copy(alpha = 0.4f)
+                            node.isRelay -> RadarPurple
+                            node.isSubGo -> RadarOrange
+                            score > 0.7f -> RadarGreen
+                            score > 0.4f -> RadarAmber
+                            else -> RadarRed
+                        }
+
+                        val isWifi = node.connectionType == ConnectionType.WIFI_DIRECT
+                        val dotRadius = if (isActive) 10f else 7f
+
+                        // Ligne de connexion au centre
+                        drawLine(
+                            color = nodeColor.copy(alpha = if (isActive) 0.3f else 0.1f),
+                            start = Offset(cx, cy), end = Offset(nx, ny), strokeWidth = 0.8f
+                        )
+
+                        // Pulse sur le nœud actif
                         if (isActive) {
-                            val pulseRadius = circleRadius + 4f + (rotationAngle % 20) / 5
-                            drawCircle(nodeColor.copy(alpha = 0.3f), pulseRadius, Offset(x, y), style = Stroke(width = 2f))
+                            val pulse = pingScale * dotRadius * 2.5f
+                            drawCircle(
+                                color = nodeColor.copy(alpha = (1f - pingScale) * 0.5f),
+                                radius = dotRadius + pulse, center = Offset(nx, ny),
+                                style = Stroke(1f)
+                            )
                         }
-                        drawContext.canvas.nativeCanvas.apply {
-                            val paint = android.graphics.Paint().apply { color = if (isActive) android.graphics.Color.WHITE else android.graphics.Color.GRAY; textSize = 22f; textAlign = android.graphics.Paint.Align.CENTER; isFakeBoldText = true }
-                            drawText(node.pseudo.take(10), x, y - 22f, paint)
-                            val scorePaint = android.graphics.Paint().apply { color = if (isActive) android.graphics.Color.YELLOW else android.graphics.Color.GRAY; textSize = 16f; textAlign = android.graphics.Paint.Align.CENTER }
-                            drawText(String.format("%.0f%%", score * 100), x, y + 30f, scorePaint)
-                            val typePaint = android.graphics.Paint().apply { color = android.graphics.Color.GRAY; textSize = 12f; textAlign = android.graphics.Paint.Align.CENTER }
-                            val typeText = when (node.connectionType) { ConnectionType.WIFI_DIRECT -> "📡 WiFi Direct"; ConnectionType.BLUETOOTH -> "🔵 Bluetooth"; ConnectionType.WIFI_AWARE -> "✨ WiFi Aware"; else -> "🔗 Connecté" }
-                            drawText(typeText, x, y + 48f, typePaint)
-                        }
-                    }
-                } else {
-                    drawContext.canvas.nativeCanvas.apply {
-                        val paint = android.graphics.Paint().apply { color = android.graphics.Color.GRAY; textSize = 28f; textAlign = android.graphics.Paint.Align.CENTER }
-                        drawText("Aucun voisin", centerX, centerY + 80f, paint)
-                        drawText("En attente de connexion...", centerX, centerY + 120f, paint)
-                    }
-                }
-            }
 
-            Column(modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)) {
-                Row(horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
-                    LegendItem(Color(0xFF1A73E8), "Moi"); LegendItem(Color(0xFF4CAF50), "Fiable (>75%)")
-                    LegendItem(Color(0xFFFF9800), "Moyen (25-75%)"); LegendItem(Color(0xFFF44336), "Faible (<25%)")
+                        // Cercle principal
+                        drawCircle(color = nodeColor, radius = dotRadius, center = Offset(nx, ny))
+                        drawCircle(
+                            color = if (isWifi) Color.White.copy(alpha = 0.8f) else RadarCyan.copy(alpha = 0.8f),
+                            radius = 3f, center = Offset(nx, ny)
+                        )
+
+                        // Marqueur spécial pour relais / sous‑GO
+                        if (node.isRelay) {
+                            drawCircle(
+                                color = RadarPurple.copy(alpha = 0.8f),
+                                radius = dotRadius + 4f, center = Offset(nx, ny),
+                                style = Stroke(2f)
+                            )
+                        } else if (node.isSubGo) {
+                            drawCircle(
+                                color = RadarOrange.copy(alpha = 0.8f),
+                                radius = dotRadius + 4f, center = Offset(nx, ny),
+                                style = Stroke(2f)
+                            )
+                        }
+
+                        // Texte (pseudo, distance, fiabilité) avec drawIntoCanvas
+                        drawIntoCanvas { canvas ->
+                            val paint = android.graphics.Paint().apply { isAntiAlias = true }
+                            // Pseudo
+                            paint.color = if (isActive) android.graphics.Color.WHITE else android.graphics.Color.GRAY
+                            paint.textSize = 22f
+                            paint.textAlign = android.graphics.Paint.Align.CENTER
+                            paint.isFakeBoldText = isActive
+                            canvas.nativeCanvas.drawText(node.pseudo.take(8), nx, ny - dotRadius - 6f, paint)
+
+                            // Distance (ne sera plus 0)
+                            paint.color = android.graphics.Color.YELLOW
+                            paint.textSize = 18f
+                            canvas.nativeCanvas.drawText("${rawDistance.toInt()}m", nx, ny + dotRadius + 18f, paint)
+
+                            // Fiabilité
+                            paint.color = android.graphics.Color.CYAN
+                            paint.textSize = 14f
+                            canvas.nativeCanvas.drawText("${(score * 100).toInt()}%", nx, ny + dotRadius + 34f, paint)
+
+                            // Icône relais / sous‑GO
+                            if (node.isRelay) {
+                                paint.color = android.graphics.Color.rgb(170, 0, 255)
+                                paint.textSize = 16f
+                                canvas.nativeCanvas.drawText("🔁", nx, ny - dotRadius - 22f, paint)
+                            } else if (node.isSubGo) {
+                                paint.color = android.graphics.Color.rgb(255, 109, 0)
+                                paint.textSize = 16f
+                                canvas.nativeCanvas.drawText("🏛️", nx, ny - dotRadius - 22f, paint)
+                            }
+                        }
+                    }
                 }
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxWidth()) {
-                    LegendItem(Color.White.copy(alpha = 0.5f), "● Pulsation = Actif")
-                    Spacer(modifier = Modifier.width(8.dp))
-                    LegendItem(Color.Gray, "○ Inactif (gris)")
+
+                // Nœud central (soi‑même)
+                drawCircle(RadarBlue, 14f, Offset(cx, cy))
+                drawIntoCanvas { canvas ->
+                    val paint = android.graphics.Paint().apply {
+                        color = android.graphics.Color.WHITE
+                        textSize = 20f
+                        textAlign = android.graphics.Paint.Align.CENTER
+                        isFakeBoldText = true
+                        isAntiAlias = true
+                    }
+                    canvas.nativeCanvas.drawText(myPseudo.take(4).uppercase(), cx, cy + 7f, paint)
+                }
+
+                // Labels des distances sur les cercles
+                for (i in 1..4) {
+                    val r = maxR * i / 4f
+                    val distLabel = "${(maxDistance * i / 4).toInt()}m"
+                    drawIntoCanvas { canvas ->
+                        val paint = android.graphics.Paint().apply {
+                            color = android.graphics.Color.argb(120, 180, 180, 180)
+                            textSize = 16f
+                            textAlign = android.graphics.Paint.Align.LEFT
+                            isAntiAlias = true
+                        }
+                        canvas.nativeCanvas.drawText(distLabel, cx + r + 3f, cy - 3f, paint)
+                    }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        // ===== LÉGENDE =====
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            RadarLegendItem(RadarGreen, "Fiable >70%")
+            RadarLegendItem(RadarAmber, "Moyen 40-70%")
+            RadarLegendItem(RadarRed, "Faible <40%")
+            RadarLegendItem(RadarPurple, "Relais")
+            RadarLegendItem(RadarOrange, "Sous-GO")
+            RadarLegendItem(RadarBlue, "Moi")
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(10.dp).background(Color.White, CircleShape))
+            Spacer(Modifier.width(4.dp))
+            Text("= WiFi Direct", fontSize = 10.sp, color = Color.Gray)
+            Spacer(Modifier.width(12.dp))
+            Box(Modifier.size(10.dp).background(RadarCyan, CircleShape))
+            Spacer(Modifier.width(4.dp))
+            Text("= BLE", fontSize = 10.sp, color = Color.Gray)
+        }
 
-        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1F20)), elevation = CardDefaults.cardElevation(4.dp)) {
+        // ===== TABLEAU DES NŒUDS =====
+        Spacer(Modifier.height(8.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = RadarSurface),
+            shape = RoundedCornerShape(12.dp)
+        ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                Text("📊 DÉTAIL DES NŒUDS", fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, color = Color(0xFF1A73E8))
-                Spacer(modifier = Modifier.height(8.dp))
-                knownNodes.values.filter { it.deviceId != myPseudo }.forEach { node ->
-                    val isActive = System.currentTimeMillis() - node.lastSeen < 30000
-                    val score = bayesianScores[node.deviceId] ?: 0.5f
-                    val scorePercent = (score * 100).toInt()
-                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(2f)) {
-                            Box(modifier = Modifier.size(8.dp).background(if (isActive) Color(0xFF4CAF50) else Color(0xFFF44336), CircleShape))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(node.pseudo, color = if (isActive) Color.White else Color.Gray, fontSize = 14.sp, fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal)
-                        }
-                        Text(formatLastSeen(node.lastSeen), color = Color.Gray, fontSize = 11.sp, modifier = Modifier.weight(1.5f))
-                        Surface(shape = RoundedCornerShape(12.dp), color = when { score > 0.7f -> Color(0xFF4CAF50).copy(alpha = 0.2f); score > 0.3f -> Color(0xFFFF9800).copy(alpha = 0.2f); else -> Color(0xFFF44336).copy(alpha = 0.2f) }) {
-                            Text("🎲 $scorePercent%", color = when { score > 0.7f -> Color(0xFF4CAF50); score > 0.3f -> Color(0xFFFF9800); else -> Color(0xFFF44336) }, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+                Text(
+                    "📊 NŒUDS DÉTECTÉS",
+                    fontSize = 13.sp, fontWeight = FontWeight.Bold, color = RadarCyan
+                )
+                Spacer(Modifier.height(6.dp))
+
+                if (neighbors.isEmpty()) {
+                    Text(
+                        "Aucun voisin détecté — en attente de connexion...",
+                        color = Color.Gray, fontSize = 12.sp,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 220.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(neighbors.sortedByDescending { it.lastSeen }) { node ->
+                            RadarNodeRow(node)
                         }
                     }
-                    LinearProgressIndicator(progress = score, modifier = Modifier.fillMaxWidth().height(4.dp), color = when { score > 0.7f -> Color(0xFF4CAF50); score > 0.3f -> Color(0xFFFF9800); else -> Color(0xFFF44336) }, trackColor = Color.Gray.copy(alpha = 0.3f))
                 }
-                if (knownNodes.size <= 1) Text("Aucun voisin détecté", color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(vertical = 16.dp))
             }
         }
-        Spacer(modifier = Modifier.height(12.dp))
-        Button(onClick = onClose, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8)), modifier = Modifier.fillMaxWidth()) { Text("Fermer", color = Color.White) }
+
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = onClose,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = RadarBlue)
+        ) {
+            Text("Fermer", color = Color.White)
+        }
     }
 }
 
+// ==================== LIGNE NŒUD (TABLEAU) ====================
 @Composable
-fun LegendItem(color: Color, text: String) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 4.dp)) {
-        Box(modifier = Modifier.size(10.dp).background(color, CircleShape))
-        Spacer(modifier = Modifier.width(4.dp))
+fun RadarNodeRow(node: MeshNode) {
+    val isActive = System.currentTimeMillis() - node.lastSeen < 30000
+    val score = node.bayesianReliability.toFloat()
+    val scoreColor = when {
+        node.isRelay -> RadarPurple
+        node.isSubGo -> RadarOrange
+        score > 0.7f -> RadarGreen
+        score > 0.4f -> RadarAmber
+        else -> RadarRed
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF111D2A), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(8.dp).background(
+                        if (isActive) RadarGreen else Color.Gray, CircleShape
+                    )
+                )
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text(
+                        node.pseudo,
+                        color = if (isActive) Color.White else Color.Gray,
+                        fontSize = 14.sp, fontWeight = FontWeight.Bold
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        val typeIcon = when (node.connectionType) {
+                            ConnectionType.WIFI_DIRECT -> "📡"
+                            ConnectionType.BLUETOOTH -> "🔵"
+                            ConnectionType.RELAY_BRIDGE -> "🔁"
+                            ConnectionType.SUB_GO -> "🏛️"
+                        }
+                        Text("$typeIcon ${node.connectionType.name}", fontSize = 10.sp, color = Color.Gray)
+                        if (node.groupId.isNotEmpty()) {
+                            Spacer(Modifier.width(8.dp))
+                            Text("Groupe: ${node.groupId.take(8)}", fontSize = 10.sp, color = RadarBlue.copy(alpha = 0.8f))
+                        }
+                        if (node.isRelay) {
+                            Spacer(Modifier.width(8.dp))
+                            Text("🔁 Relais", fontSize = 10.sp, color = RadarPurple)
+                        } else if (node.isSubGo) {
+                            Spacer(Modifier.width(8.dp))
+                            Text("🏛️ Sous-GO", fontSize = 10.sp, color = RadarOrange)
+                        }
+                        if (node.superGoId != null) {
+                            Spacer(Modifier.width(8.dp))
+                            Text("↑ ${node.superGoId.take(4)}", fontSize = 9.sp, color = Color.Gray)
+                        }
+                    }
+                }
+            }
+
+            Column(horizontalAlignment = Alignment.End) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = scoreColor.copy(alpha = 0.15f)
+                ) {
+                    Text(
+                        "${(score * 100).toInt()}%",
+                        color = scoreColor, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                }
+                Text(
+                    "📏 ${node.estimatedDistance.toInt()} m",
+                    color = Color(0xFFFFEB3B), fontSize = 11.sp
+                )
+                Text(
+                    formatLastSeenRadar(node.lastSeen),
+                    color = Color.Gray, fontSize = 10.sp
+                )
+                if (node.batteryLevel < 100) {
+                    Text(
+                        "🔋 ${node.batteryLevel}%",
+                        color = if (node.batteryLevel < 20) RadarRed else RadarGreen,
+                        fontSize = 9.sp
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(4.dp))
+        LinearProgressIndicator(
+            progress = score,
+            modifier = Modifier.fillMaxWidth().height(3.dp),
+            color = scoreColor,
+            trackColor = Color.Gray.copy(alpha = 0.2f)
+        )
+    }
+}
+
+// ==================== LÉGENDE ====================
+@Composable
+fun RadarLegendItem(color: Color, text: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(horizontal = 2.dp)
+    ) {
+        Box(Modifier.size(8.dp).background(color, CircleShape))
+        Spacer(Modifier.width(3.dp))
         Text(text, fontSize = 9.sp, color = Color.Gray)
     }
 }
 
-private fun formatLastSeen(timestamp: Long): String {
+// ==================== UTILITAIRE ====================
+private fun formatLastSeenRadar(timestamp: Long): String {
     val diff = System.currentTimeMillis() - timestamp
     return when {
         diff < 5000 -> "🟢 maintenant"
-        diff < 30000 -> "🟡 il y a ${diff / 1000}s"
-        diff < 60000 -> "🟠 il y a ${diff / 1000}s"
+        diff < 30000 -> "🟡 ${diff / 1000}s"
+        diff < 60000 -> "🟠 ${diff / 1000}s"
         else -> "🔴 inactif"
     }
 }
