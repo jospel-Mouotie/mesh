@@ -13,11 +13,18 @@ enum class PacketType {
     MESSAGE, AUDIO, FILE, HEARTBEAT, NODE_INFO, ACK,
     ROUTE_UPDATE, GO_HEARTBEAT,
     TEST_REACHABILITY, CAN_REACH, BECOME_RELAY, GROUP_DISSOLVE,
-    RELAY_REGISTER, RELAY_UNREGISTER, GO_TO_GO_PEERING, GO_TO_GO_ACCEPT, HIERARCHY_MERGE
+    RELAY_REGISTER, RELAY_UNREGISTER, GO_TO_GO_PEERING, GO_TO_GO_ACCEPT, HIERARCHY_MERGE,
+    CLIENT_LIST  // AJOUTÉ pour la liste des clients
 }
 
 enum class MeshMode { BLUETOOTH, WIFI_DIRECT, HYBRID }
 enum class ConnectionType { WIFI_DIRECT, BLUETOOTH, RELAY_BRIDGE, SUB_GO }
+
+// ==================== NOUVEAU : Informations d'un client ====================
+data class ClientInfo(
+    val id: String,
+    val pseudo: String
+)
 
 // ==================== PAQUET RÉSEAU ====================
 
@@ -43,7 +50,8 @@ data class MeshPacket(
     val relayForClients: List<String>? = null,
     val newGoInfo: GoInfo? = null,
     val relayInfo: RelayInfo? = null,
-    val hierarchyInfo: HierarchyInfo? = null
+    val hierarchyInfo: HierarchyInfo? = null,
+    val clientList: List<ClientInfo>? = null  // AJOUTÉ
 ) {
     override fun equals(other: Any?): Boolean = other is MeshPacket && id == other.id
     override fun hashCode(): Int = id.hashCode()
@@ -110,7 +118,6 @@ data class MeshNode(
 )
 
 // ==================== MESSAGE POUR L’UI ====================
-// Dans Models.kt, modifiez ChatMessage comme suit :
 data class ChatMessage(
     val id: String,
     val sender: String,
@@ -127,6 +134,6 @@ data class ChatMessage(
     val fileName: String? = null,
     val fileSize: Long = 0,
     var isPlaying: Boolean = false,
-    val replyToId: String? = null,        // Ajouté
-    val replyToContent: String? = null    // Ajouté
+    val replyToId: String? = null,
+    val replyToContent: String? = null
 )
