@@ -86,7 +86,7 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.5.2")
     androidTestImplementation("androidx.test:rules:1.5.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
-
+    implementation("androidx.compose.material:material-icons-extended:1.6.0")
     // Material 3
     implementation("androidx.compose.material3:material3:1.1.2")
     implementation("androidx.compose.material3:material3-window-size-class:1.1.2")

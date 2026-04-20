@@ -1,12 +1,18 @@
 package com.example.myapplication
 
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.os.*
+import android.os.Build
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import java.util.*
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MeshService : Service() {
@@ -14,6 +20,7 @@ class MeshService : Service() {
     private var meshManager: MeshManager? = null
     private var myId: String? = null
     private var myPseudo: String? = null
+    private var myGroupId: String? = null   // ← NOUVEAU
 
     private val CHANNEL_ID  = "MeshServiceChannel"
     private val NOTIF_ID    = 101
@@ -23,8 +30,6 @@ class MeshService : Service() {
     private val isServiceReady  = AtomicBoolean(false)
     private val isInitializing  = AtomicBoolean(false)
     private val handler         = Handler(Looper.getMainLooper())
-
-    // ==================== LIFECYCLE ====================
 
     override fun onCreate() {
         super.onCreate()
@@ -39,7 +44,6 @@ class MeshService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Log de l'action pour le débug
         val action = intent?.action
         Log.i(TAG, "📞 onStartCommand | Action: $action")
 
@@ -49,9 +53,9 @@ class MeshService : Service() {
         }
 
         try {
-            // Récupération des identifiants (Intent ou SharedPreferences)
             var id = intent?.getStringExtra("user_id")
             var pseudo = intent?.getStringExtra("user_pseudo")
+            var groupId = intent?.getStringExtra("user_group_id")
 
             val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             if (id == null || pseudo == null) {
@@ -59,6 +63,17 @@ class MeshService : Service() {
                 pseudo = prefs.getString("user_pseudo", null)
             } else {
                 prefs.edit().putString("user_id", id).putString("user_pseudo", pseudo).apply()
+            }
+
+            // Gestion du groupId : récupération ou génération automatique
+            if (groupId == null) {
+                groupId = prefs.getString("user_group_id", null)
+                if (groupId == null) {
+                    groupId = "GROUP-" + UUID.randomUUID().toString().take(6).uppercase()
+                    prefs.edit().putString("user_group_id", groupId).apply()
+                }
+            } else {
+                prefs.edit().putString("user_group_id", groupId).apply()
             }
 
             if (id == null || pseudo == null) {
@@ -69,20 +84,18 @@ class MeshService : Service() {
 
             myId = id
             myPseudo = pseudo
+            myGroupId = groupId
 
-            // Initialisation unique du MeshManager
             if (!isServiceReady.get() && !isInitializing.get()) {
                 setupMeshManager()
             }
 
-            // Gestion des actions spécifiques
             intent?.let { handleIntentAction(it) }
 
         } catch (e: Exception) {
             Log.e(TAG, "💥 Erreur onStartCommand", e)
         }
 
-        // START_STICKY permet au service de redémarrer tout seul si Android le tue pour manque de RAM
         return START_STICKY
     }
 
@@ -94,7 +107,6 @@ class MeshService : Service() {
         handler.removeCallbacksAndMessages(null)
 
         try {
-            // APPEL DE LA FONCTION STOP DU MANAGER
             meshManager?.stop()
         } catch (e: Exception) {
             Log.e(TAG, "Erreur stop manager", e)
@@ -107,12 +119,10 @@ class MeshService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ==================== FOREGROUND ====================
-
     private fun startForegroundNow() {
         try {
             val notification = buildNotification()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // SDK 34
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(
                     NOTIF_ID,
                     notification,
@@ -153,8 +163,6 @@ class MeshService : Service() {
         }
     }
 
-    // ==================== CONFIGURATION DU MESH ====================
-
     private fun setupMeshManager() {
         if (isInitializing.getAndSet(true)) return
 
@@ -163,8 +171,8 @@ class MeshService : Service() {
         try {
             val currentId = myId ?: throw Exception("ID null")
             val currentPseudo = myPseudo ?: throw Exception("Pseudo null")
+            val currentGroupId = myGroupId ?: throw Exception("GroupId null")
 
-            // Nettoyage de l'ancienne instance si elle existe
             meshManager?.stop()
             meshManager = null
 
@@ -172,6 +180,7 @@ class MeshService : Service() {
                 context = this,
                 myId = currentId,
                 myPseudo = currentPseudo,
+                // myGroupId = currentGroupId,   // ← À SUPPRIMER
                 mode = MeshMode.HYBRID,
                 onStatusUpdate = { status ->
                     Log.i(TAG, "📡 [Status] $status")
@@ -220,7 +229,6 @@ class MeshService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "💥 Échec setupMeshManager", e)
             isInitializing.set(false)
-            // Tentative de reconnexion automatique après 5 secondes
             handler.postDelayed({ if (!isServiceReady.get()) setupMeshManager() }, 5000)
         }
     }
@@ -262,6 +270,7 @@ class MeshService : Service() {
 
         executor.execute { meshManager?.sendPacket(packet) }
     }
+
     private fun broadcastToApp(action: String, key: String, value: String) {
         val intent = Intent(action).apply {
             putExtra(key, value)
@@ -275,6 +284,5 @@ class MeshService : Service() {
         broadcastToApp("MESH_TOPOLOGY_UPDATE", "state", status)
     }
 
-    // Ajout d'un exécuteur simple pour les tâches de fond si nécessaire
     private val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
 }

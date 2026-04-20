@@ -14,16 +14,21 @@ enum class PacketType {
     ROUTE_UPDATE, GO_HEARTBEAT,
     TEST_REACHABILITY, CAN_REACH, BECOME_RELAY, GROUP_DISSOLVE,
     RELAY_REGISTER, RELAY_UNREGISTER, GO_TO_GO_PEERING, GO_TO_GO_ACCEPT, HIERARCHY_MERGE,
-    CLIENT_LIST  // AJOUTÉ pour la liste des clients
+    CROSS_GROUP_MESSAGE,
+    GROUP_ANNOUNCEMENT,
+    CLIENT_LIST,
+    CLIENT_LIST_REQUEST,
+    ROUTE_DISCOVERY      // ← AJOUTÉ pour la découverte de route
 }
 
 enum class MeshMode { BLUETOOTH, WIFI_DIRECT, HYBRID }
 enum class ConnectionType { WIFI_DIRECT, BLUETOOTH, RELAY_BRIDGE, SUB_GO }
 
-// ==================== NOUVEAU : Informations d'un client ====================
+// ==================== INFORMATIONS D'UN CLIENT (AVEC IP) ====================
 data class ClientInfo(
     val id: String,
-    val pseudo: String
+    val pseudo: String,
+    val ip: String
 )
 
 // ==================== PAQUET RÉSEAU ====================
@@ -51,7 +56,7 @@ data class MeshPacket(
     val newGoInfo: GoInfo? = null,
     val relayInfo: RelayInfo? = null,
     val hierarchyInfo: HierarchyInfo? = null,
-    val clientList: List<ClientInfo>? = null  // AJOUTÉ
+    val clientList: List<ClientInfo>? = null
 ) {
     override fun equals(other: Any?): Boolean = other is MeshPacket && id == other.id
     override fun hashCode(): Int = id.hashCode()
@@ -118,6 +123,7 @@ data class MeshNode(
 )
 
 // ==================== MESSAGE POUR L’UI ====================
+
 data class ChatMessage(
     val id: String,
     val sender: String,
