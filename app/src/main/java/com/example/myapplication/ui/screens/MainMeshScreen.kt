@@ -1,5 +1,6 @@
 package com.example.myapplication.ui.screens
 
+import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -12,6 +13,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -33,6 +35,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Radar
@@ -44,15 +47,20 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DoneAll
 import androidx.compose.material.icons.rounded.Error
+import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Reply
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
@@ -60,6 +68,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -78,17 +87,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.myapplication.ChatMessage
+import com.example.myapplication.ConnectionType
 import com.example.myapplication.MeshNode
 import com.example.myapplication.MessageStatus
 import com.example.myapplication.PacketType
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainMeshScreen(
     myId: String,
@@ -104,6 +118,9 @@ fun MainMeshScreen(
     playingAudioId: String?,
     isRecording: Boolean,
     replyingToMessage: ChatMessage?,
+    backgroundColor: Color,
+    backgroundImageUri: Uri?,
+    backgroundType: String,
     onChatSelected: (String) -> Unit,
     onMenuClick: () -> Unit,
     onMapToggle: () -> Unit,
@@ -124,20 +141,39 @@ fun MainMeshScreen(
     onRefresh: () -> Unit,
     onClearMessages: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenFile: (ChatMessage) -> Unit
+    onOpenFile: (ChatMessage) -> Unit,
+    onBecomeGO: () -> Unit,
+    onJoinGroup: () -> Unit
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    // Calculer le nom du chat pour l'affichage dans la top bar
+    val selectedChatName = if (selectedChatId == "TOUS") {
+        "MIT MESH"
+    } else {
+        nodes[selectedChatId]?.pseudo ?: "Discussion"
+    }
 
     val filteredMessages = remember(selectedChatId, messages, searchQuery) {
         val baseList = if (selectedChatId == "TOUS") {
+            // Canal général : messages dont le destinataire est "TOUS"
             messages.filter { it.receiverId == "TOUS" }
         } else {
-            messages.filter {
-                (it.senderIdRaw == myId && it.receiverId == selectedChatId) ||
-                        (it.senderIdRaw == selectedChatId && it.receiverId == myId)
+            // Conversation privée : tous les messages échangés entre myId et selectedChatId
+            // Peu importe qui est l'expéditeur ou le destinataire
+            messages.filter { msg ->
+                (msg.senderIdRaw == myId && msg.receiverId == selectedChatId) ||
+                        (msg.senderIdRaw == selectedChatId && msg.receiverId == myId) ||
+                        // Cas où le message est un broadcast mais vient du contact
+                        (msg.senderIdRaw == selectedChatId && msg.receiverId == "TOUS") ||
+                        // Cas où le message est privé mais l'ID est stocké différemment
+                        (msg.senderIdRaw == selectedChatId && msg.receiverId == myId) ||
+                        (msg.sender == selectedChatId || msg.sender == myPseudo)
             }
         }
+
         if (searchQuery.isBlank()) baseList
         else baseList.filter {
             it.content.contains(searchQuery, ignoreCase = true) ||
@@ -162,15 +198,18 @@ fun MainMeshScreen(
                 onRefresh = onRefresh,
                 onShowRadar = onRadarClick,
                 onClearMessages = onClearMessages,
-                onOpenSettings = onOpenSettings
+                onOpenSettings = onOpenSettings,
+                onBecomeGO = onBecomeGO,
+                onJoinGroup = onJoinGroup
             )
         }
     ) {
         Scaffold(
-            containerColor = Color(0xFFF1F3F5),
+            containerColor = Color.Transparent,
             topBar = {
                 AppTopBar(
                     selectedChatId = selectedChatId,
+                    selectedChatName = selectedChatName,
                     networkStatus = networkStatus,
                     isMeshActive = isMeshActive,
                     onMenuClick = { scope.launch { drawerState.open() } },
@@ -204,34 +243,61 @@ fun MainMeshScreen(
                 }
             }
         ) { padding ->
-            Column(
+            Box(
                 modifier = Modifier
-                    .padding(padding)
                     .fillMaxSize()
+                    .padding(padding)
             ) {
-                AnimatedVisibility(visible = showSearchBar) {
-                    SearchBar(
-                        query = searchQuery,
-                        onQueryChange = onSearchQueryChange,
-                        onClose = onSearchClose
-                    )
+                // Fond personnalisé
+                when (backgroundType) {
+                    "image" -> {
+                        backgroundImageUri?.let { uri ->
+                            val bitmap = runCatching {
+                                context.contentResolver.openInputStream(uri)?.use {
+                                    android.graphics.BitmapFactory.decodeStream(it)
+                                }
+                            }.getOrNull()
+                            bitmap?.let {
+                                Image(
+                                    bitmap = it.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                            } ?: Box(Modifier.fillMaxSize().background(backgroundColor))
+                        } ?: Box(Modifier.fillMaxSize().background(backgroundColor))
+                    }
+                    else -> Box(Modifier.fillMaxSize().background(backgroundColor))
                 }
 
-                if (showNetworkMap) {
-                    NetworkMapBar(nodes = nodes, myPseudo = myPseudo)
-                } else {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        if (filteredMessages.isEmpty()) {
-                            EmptyChatState(selectedChatId)
-                        } else {
-                            ChatView(
-                                messages = filteredMessages,
-                                playingAudioId = playingAudioId,
-                                onPlayAudio = onPlayAudio,
-                                onDeleteMessage = onDeleteMessage,
-                                onReply = onReply,
-                                onOpenFile = onOpenFile
-                            )
+                // Contenu principal
+                Column(
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    AnimatedVisibility(visible = showSearchBar) {
+                        SearchBar(
+                            query = searchQuery,
+                            onQueryChange = onSearchQueryChange,
+                            onClose = onSearchClose
+                        )
+                    }
+
+                    if (showNetworkMap) {
+                        NetworkMapBar(nodes = nodes, myPseudo = myPseudo)
+                    } else {
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            if (filteredMessages.isEmpty()) {
+                                EmptyChatState(selectedChatId)
+                            } else {
+                                ChatView(
+                                    messages = filteredMessages,
+                                    playingAudioId = playingAudioId,
+                                    onPlayAudio = onPlayAudio,
+                                    onDeleteMessage = onDeleteMessage,
+                                    onReply = onReply,
+                                    onOpenFile = onOpenFile
+                                )
+                            }
                         }
                     }
                 }
@@ -244,6 +310,7 @@ fun MainMeshScreen(
 @Composable
 fun AppTopBar(
     selectedChatId: String,
+    selectedChatName: String,
     networkStatus: String,
     isMeshActive: Boolean,
     onMenuClick: () -> Unit,
@@ -255,7 +322,7 @@ fun AppTopBar(
 ) {
     CenterAlignedTopAppBar(
         colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-            containerColor = Color.White,
+            containerColor = Color.White.copy(alpha = 0.95f),
             titleContentColor = Color(0xFF202124),
             navigationIconContentColor = Color(0xFF1A73E8),
             actionIconContentColor = Color(0xFF1A73E8)
@@ -268,9 +335,10 @@ fun AppTopBar(
         title = {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    if (selectedChatId == "TOUS") "MIT MESH"
-                    else "Discussion",
-                    fontWeight = FontWeight.Bold, fontSize = 16.sp
+                    selectedChatName,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    color = Color(0xFF202124)
                 )
                 Text(
                     networkStatus, fontSize = 10.sp,
@@ -279,7 +347,8 @@ fun AppTopBar(
                         networkStatus.contains("❌") -> Color(0xFFD32F2F)
                         else -> Color(0xFFE65100)
                     },
-                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         },
@@ -302,7 +371,10 @@ fun AppTopBar(
 
 @Composable
 fun SearchBar(query: String, onQueryChange: (String) -> Unit, onClose: () -> Unit) {
-    Surface(color = Color(0xFFF0F2F5), modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        color = Color(0xFFF0F2F5).copy(alpha = 0.95f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
         Row(
             modifier = Modifier.padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -341,10 +413,20 @@ fun ChatView(
     if (messages.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Rounded.ChatBubbleOutline, null, modifier = Modifier.size(56.dp), tint = Color(0xFF5F6368).copy(0.4f))
+                Icon(
+                    Icons.Rounded.ChatBubbleOutline, null,
+                    modifier = Modifier.size(56.dp),
+                    tint = Color(0xFF5F6368).copy(0.4f)
+                )
                 Spacer(Modifier.height(12.dp))
                 Text("Aucun message", color = Color(0xFF5F6368), fontSize = 16.sp)
-                Text("Envoyez un message ou attendez vos contacts", color = Color(0xFF5F6368).copy(0.6f), fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 32.dp))
+                Text(
+                    "Envoyez un message ou attendez vos contacts",
+                    color = Color(0xFF5F6368).copy(0.6f),
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 32.dp)
+                )
             }
         }
     } else {
@@ -405,7 +487,7 @@ fun MessageBubble(
             }
 
             Surface(
-                color = if (msg.isMine) Color(0xFF1A73E8).copy(0.1f) else Color.White,
+                color = if (msg.isMine) Color(0xFF1A73E8).copy(0.1f) else Color.White.copy(alpha = 0.95f),
                 shape = RoundedCornerShape(
                     topStart = 16.dp, topEnd = 16.dp,
                     bottomStart = if (msg.isMine) 16.dp else 4.dp,
@@ -418,23 +500,51 @@ fun MessageBubble(
                 )
             ) {
                 Column(modifier = Modifier.padding(10.dp)) {
+                    // Affichage du message auquel on répond (réponse)
                     if (msg.replyToContent != null) {
                         Surface(
                             color = Color(0xFFF1F3F4),
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.padding(bottom = 4.dp)
                         ) {
-                            Column(Modifier.padding(6.dp)) {
-                                Text("↩️ Réponse à", fontSize = 10.sp, color = Color(0xFF5F6368))
-                                Text(msg.replyToContent, fontSize = 12.sp, color = Color(0xFF202124), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Row(
+                                modifier = Modifier.padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Reply,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp),
+                                    tint = Color(0xFF5F6368)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Column {
+                                    Text(
+                                        "↩️ Réponse à",
+                                        fontSize = 10.sp,
+                                        color = Color(0xFF5F6368)
+                                    )
+                                    Text(
+                                        msg.replyToContent,
+                                        fontSize = 12.sp,
+                                        color = Color(0xFF1A73E8),
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
                             }
                         }
                     }
+
+                    // Contenu du message
                     when (msg.type) {
                         PacketType.AUDIO -> AudioBubble(msg, isPlaying, onPlayAudio)
                         PacketType.FILE  -> FileBubble(msg, onOpenFile)
                         else -> Text(msg.content, color = Color(0xFF202124), fontSize = 15.sp)
                     }
+
+                    // Heure et statut
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                         horizontalArrangement = Arrangement.End,
@@ -561,18 +671,33 @@ fun ChatInputBar(
         Column {
             if (replyingTo != null) {
                 Surface(
-                    color = Color(0xFFF0F2F5),
+                    color = Color(0xFFF0F2F5).copy(alpha = 0.95f),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Row(
-                        Modifier.padding(8.dp),
+                        modifier = Modifier.padding(8.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
-                            Text("↩️ Réponse à", fontSize = 10.sp, color = Color(0xFF5F6368))
-                            Text(replyingTo.content.take(40), fontSize = 12.sp, color = Color(0xFF202124))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Rounded.Reply,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = Color(0xFF1A73E8)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Column {
+                                Text("Réponse à", fontSize = 10.sp, color = Color(0xFF5F6368))
+                                Text(
+                                    replyingTo.content.take(40),
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF1A73E8),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                         IconButton(onClick = onCancelReply) {
                             Icon(Icons.Rounded.Close, null, tint = Color(0xFF5F6368), modifier = Modifier.size(16.dp))
@@ -582,7 +707,12 @@ fun ChatInputBar(
             }
 
             AnimatedVisibility(showExtra) {
-                Surface(color = Color.White, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp), shadowElevation = 2.dp) {
+                Surface(
+                    color = Color.White.copy(alpha = 0.95f),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                    shadowElevation = 2.dp
+                ) {
                     Row(modifier = Modifier.padding(8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             IconButton(
@@ -625,7 +755,11 @@ fun ChatInputBar(
             if (isRecording) {
                 RecordingIndicator(onStopRecord)
             } else {
-                Surface(color = Color.White, shape = RoundedCornerShape(28.dp), shadowElevation = 4.dp) {
+                Surface(
+                    color = Color.White.copy(alpha = 0.95f),
+                    shape = RoundedCornerShape(28.dp),
+                    shadowElevation = 4.dp
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -699,7 +833,79 @@ fun RecordingIndicator(onStop: () -> Unit) {
     }
 }
 
-// Fon utilitaire (à mettre dans un objet séparé si besoin)
+@Composable
+fun EmptyChatState(chatId: String) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        val icon = if (chatId == "TOUS") Icons.Rounded.Groups else Icons.Rounded.Forum
+        val text = if (chatId == "TOUS") {
+            "Canal Public Mesh\nTous les appareils à proximité recevront vos messages."
+        } else {
+            "Conversation Privée P2P\nLes messages sont routés directement vers ce nœud."
+        }
+
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(80.dp),
+            tint = Color.White.copy(alpha = 0.7f)
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = text,
+            color = Color.White.copy(alpha = 0.8f),
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
+
+@Composable
+fun NetworkMapBar(nodes: Map<String, MeshNode>, myPseudo: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(8.dp).height(110.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.95f)),
+        shape = RoundedCornerShape(16.dp),
+        elevation = CardDefaults.cardElevation(2.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(shape = CircleShape, color = Color(0xFF1A73E8).copy(0.2f),
+                border = BorderStroke(2.dp, Color(0xFF1A73E8)), modifier = Modifier.size(52.dp)) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(myPseudo.take(1).uppercase(), color = Color(0xFF1A73E8), fontWeight = FontWeight.Bold)
+                }
+            }
+            nodes.values.take(4).forEach { node ->
+                Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, tint = Color(0xFF5F6368), modifier = Modifier.size(14.dp))
+                val isWifi = node.connectionType == ConnectionType.WIFI_DIRECT
+                Surface(shape = CircleShape,
+                    color = (if (isWifi) Color(0xFF1A73E8) else Color(0xFF8E24AA)).copy(0.15f),
+                    border = BorderStroke(1.5.dp, if (isWifi) Color(0xFF1A73E8) else Color(0xFF8E24AA)),
+                    modifier = Modifier.size(42.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(node.pseudo.take(1).uppercase(), color = if (isWifi) Color(0xFF1A73E8) else Color(0xFF8E24AA), fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                }
+            }
+            if (nodes.size > 4) {
+                Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, tint = Color(0xFF5F6368), modifier = Modifier.size(14.dp))
+                Surface(shape = CircleShape, color = Color(0xFFF0F2F5), modifier = Modifier.size(38.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text("+${nodes.size - 4}", color = Color(0xFF5F6368), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
 private fun formatFileSize(bytes: Long): String = when {
     bytes < 1024 -> "$bytes o"
     bytes < 1024 * 1024 -> "${bytes / 1024} Ko"

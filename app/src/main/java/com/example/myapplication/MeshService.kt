@@ -20,7 +20,6 @@ class MeshService : Service() {
     private var meshManager: MeshManager? = null
     private var myId: String? = null
     private var myPseudo: String? = null
-    private var myGroupId: String? = null   // ← NOUVEAU
 
     private val CHANNEL_ID  = "MeshServiceChannel"
     private val NOTIF_ID    = 101
@@ -55,7 +54,6 @@ class MeshService : Service() {
         try {
             var id = intent?.getStringExtra("user_id")
             var pseudo = intent?.getStringExtra("user_pseudo")
-            var groupId = intent?.getStringExtra("user_group_id")
 
             val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             if (id == null || pseudo == null) {
@@ -63,17 +61,6 @@ class MeshService : Service() {
                 pseudo = prefs.getString("user_pseudo", null)
             } else {
                 prefs.edit().putString("user_id", id).putString("user_pseudo", pseudo).apply()
-            }
-
-            // Gestion du groupId : récupération ou génération automatique
-            if (groupId == null) {
-                groupId = prefs.getString("user_group_id", null)
-                if (groupId == null) {
-                    groupId = "GROUP-" + UUID.randomUUID().toString().take(6).uppercase()
-                    prefs.edit().putString("user_group_id", groupId).apply()
-                }
-            } else {
-                prefs.edit().putString("user_group_id", groupId).apply()
             }
 
             if (id == null || pseudo == null) {
@@ -84,7 +71,6 @@ class MeshService : Service() {
 
             myId = id
             myPseudo = pseudo
-            myGroupId = groupId
 
             if (!isServiceReady.get() && !isInitializing.get()) {
                 setupMeshManager()
@@ -103,15 +89,8 @@ class MeshService : Service() {
         Log.i(TAG, "🛑 Destruction du MeshService...")
         isServiceReady.set(false)
         isInitializing.set(false)
-
         handler.removeCallbacksAndMessages(null)
-
-        try {
-            meshManager?.stop()
-        } catch (e: Exception) {
-            Log.e(TAG, "Erreur stop manager", e)
-        }
-
+        try { meshManager?.stop() } catch (e: Exception) { }
         meshManager = null
         super.onDestroy()
         Log.i(TAG, "✅ MeshService totalement arrêté")
@@ -123,11 +102,7 @@ class MeshService : Service() {
         try {
             val notification = buildNotification()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    NOTIF_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                )
+                startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             } else {
                 startForeground(NOTIF_ID, notification)
             }
@@ -150,16 +125,11 @@ class MeshService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Canal Mesh Service",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
+            val channel = NotificationChannel(CHANNEL_ID, "Canal Mesh Service", NotificationManager.IMPORTANCE_LOW).apply {
                 description = "Maintient le réseau maillé actif en arrière-plan"
                 setSound(null, null)
             }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 
@@ -171,7 +141,6 @@ class MeshService : Service() {
         try {
             val currentId = myId ?: throw Exception("ID null")
             val currentPseudo = myPseudo ?: throw Exception("Pseudo null")
-            val currentGroupId = myGroupId ?: throw Exception("GroupId null")
 
             meshManager?.stop()
             meshManager = null
@@ -180,7 +149,6 @@ class MeshService : Service() {
                 context = this,
                 myId = currentId,
                 myPseudo = currentPseudo,
-                // myGroupId = currentGroupId,   // ← À SUPPRIMER
                 mode = MeshMode.HYBRID,
                 onStatusUpdate = { status ->
                     Log.i(TAG, "📡 [Status] $status")
@@ -191,11 +159,15 @@ class MeshService : Service() {
                         putExtra("id", msg.id)
                         putExtra("sender", msg.sender)
                         putExtra("content", msg.content)
+                        putExtra("receiver", msg.receiverId)
                         putExtra("type", msg.type.name)
+                        putExtra("timestamp", msg.timestamp)
                         putExtra("audio_path", msg.audioPath)
                         putExtra("file_path", msg.filePath)
                         putExtra("file_name", msg.fileName)
                         putExtra("file_size", msg.fileSize)
+                        putExtra("reply_to_id", msg.replyToId)
+                        putExtra("reply_to_content", msg.replyToContent)
                         setPackage(packageName)
                     }
                     sendBroadcast(intent)
@@ -239,7 +211,35 @@ class MeshService : Service() {
                 if (isServiceReady.get()) sendMessage(intent)
                 else Log.w(TAG, "Pas d'envoi : MeshManager non prêt")
             }
+            "ACTION_SEND_LARGE_FILE" -> {
+                if (isServiceReady.get()) sendLargeFile(intent)
+                else Log.w(TAG, "Pas d'envoi gros fichier : MeshManager non prêt")
+            }
             "ACTION_GET_TOPOLOGY" -> broadcastTopology()
+            "ACTION_BECOME_GO" -> {
+                if (isServiceReady.get()) {
+                    Log.i(TAG, "🔧 Action BECOME_GO reçue")
+                    meshManager?.forceBecomeGroupOwner()
+                } else {
+                    Log.w(TAG, "MeshManager non prêt pour devenir GO")
+                }
+            }
+            "ACTION_JOIN_GROUP" -> {
+                if (isServiceReady.get()) {
+                    Log.i(TAG, "🔧 Action JOIN_GROUP reçue")
+                    meshManager?.forceJoinExistingGroup()
+                } else {
+                    Log.w(TAG, "MeshManager non prêt pour rejoindre un groupe")
+                }
+            }
+            "ACTION_RECONNECT_TCP" -> {
+                if (isServiceReady.get()) {
+                    Log.i(TAG, "🔧 Action RECONNECT_TCP reçue")
+                    meshManager?.forceReconnectTcp()
+                } else {
+                    Log.w(TAG, "MeshManager non prêt pour reconnecter TCP")
+                }
+            }
         }
     }
 
@@ -267,8 +267,63 @@ class MeshService : Service() {
             fileName = fileName,
             fileSize = fileSize
         )
-
         executor.execute { meshManager?.sendPacket(packet) }
+    }
+
+    private fun sendLargeFile(intent: Intent) {
+        val destination = intent.getStringExtra("destination") ?: return
+        val filePath = intent.getStringExtra("file_path") ?: return
+        val fileName = intent.getStringExtra("file_name") ?: "fichier"
+        val fileSize = intent.getLongExtra("file_size", 0)
+        val messageId = intent.getStringExtra("message_id")
+        val isAudio = intent.getBooleanExtra("is_audio", false)
+
+        meshManager?.startLargeFileSend(
+            destinationId = destination,
+            filePath = filePath,
+            fileName = fileName,
+            fileSize = fileSize,
+            onProgress = { sent, total ->
+                val progressIntent = Intent("FILE_TRANSFER_PROGRESS").apply {
+                    putExtra("destination", destination)
+                    putExtra("sent", sent)
+                    putExtra("total", total)
+                    putExtra("file_name", fileName)
+                    setPackage(packageName)
+                }
+                sendBroadcast(progressIntent)
+            },
+            onComplete = {
+                // Envoyer un message au destinataire avec le BON senderId
+                val msgIntent = Intent("MESH_MESSAGE_RECEIVED").apply {
+                    putExtra("id", UUID.randomUUID().toString())
+                    putExtra("sender", myPseudo)
+                    putExtra("sender_id", myId)           // ← ID correct
+                    putExtra("content", fileName)
+                    putExtra("receiver", destination)
+                    putExtra("type", if (isAudio) PacketType.AUDIO.name else PacketType.FILE.name)
+                    putExtra("timestamp", System.currentTimeMillis())
+                    putExtra("file_path", filePath)
+                    putExtra("audio_path", if (isAudio) filePath else null)
+                    putExtra("file_name", fileName)
+                    putExtra("file_size", fileSize)
+                    setPackage(packageName)
+                }
+                sendBroadcast(msgIntent)
+
+                val completeIntent = Intent("FILE_TRANSFER_COMPLETE").apply {
+                    putExtra("destination", destination)
+                    putExtra("file_name", fileName)
+                    putExtra("file_path", filePath)
+                    putExtra("message_id", messageId)
+                    setPackage(packageName)
+                }
+                sendBroadcast(completeIntent)
+            },
+            onError = { err ->
+                broadcastToApp("MESH_ERROR", "error", "Transfert fichier: $err")
+            }
+        )
     }
 
     private fun broadcastToApp(action: String, key: String, value: String) {

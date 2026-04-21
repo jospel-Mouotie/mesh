@@ -1,38 +1,44 @@
 package com.example.myapplication
 
-import android.net.Uri
-import java.util.*
+import java.util.Random
+import java.util.UUID
 
 // ==================== ENUMS ====================
-
-enum class MessageStatus {
-    SENDING, SENT, RECEIVED, FAILED, RELAYED
-}
-
-enum class PacketType {
-    MESSAGE, AUDIO, FILE, HEARTBEAT, NODE_INFO, ACK,
-    ROUTE_UPDATE, GO_HEARTBEAT,
-    TEST_REACHABILITY, CAN_REACH, BECOME_RELAY, GROUP_DISSOLVE,
-    RELAY_REGISTER, RELAY_UNREGISTER, GO_TO_GO_PEERING, GO_TO_GO_ACCEPT, HIERARCHY_MERGE,
-    CROSS_GROUP_MESSAGE,
-    GROUP_ANNOUNCEMENT,
-    CLIENT_LIST,
-    CLIENT_LIST_REQUEST,
-    ROUTE_DISCOVERY      // ← AJOUTÉ pour la découverte de route
-}
-
+enum class MessageStatus { SENDING, SENT, RECEIVED, FAILED, RELAYED }
 enum class MeshMode { BLUETOOTH, WIFI_DIRECT, HYBRID }
 enum class ConnectionType { WIFI_DIRECT, BLUETOOTH, RELAY_BRIDGE, SUB_GO }
 
-// ==================== INFORMATIONS D'UN CLIENT (AVEC IP) ====================
-data class ClientInfo(
-    val id: String,
-    val pseudo: String,
-    val ip: String
+enum class PacketType {
+    MESSAGE, AUDIO, FILE, HEARTBEAT, NODE_INFO, ACK,
+    ROUTE_UPDATE, GO_HEARTBEAT, TEST_REACHABILITY, CAN_REACH,
+    BECOME_RELAY, GROUP_DISSOLVE, RELAY_REGISTER, RELAY_UNREGISTER,
+    GO_TO_GO_PEERING, GO_TO_GO_ACCEPT, HIERARCHY_MERGE,
+    CROSS_GROUP_MESSAGE, GROUP_ANNOUNCEMENT, CLIENT_LIST,
+    CLIENT_LIST_REQUEST, ROUTE_DISCOVERY,
+    FILE_TRANSFER_START, FILE_CHUNK, FILE_CHUNK_ACK,
+    FILE_TRANSFER_COMPLETE, FILE_TRANSFER_CANCEL, FILE_TRANSFER_RESUME
+}
+
+// ==================== TRANSFERT DE FICHIERS ====================
+data class FileTransferStart(
+    val transferId: String,
+    val fileName: String,
+    val fileSize: Long,
+    val totalChunks: Int,
+    val chunkSize: Int,
+    val senderPort: Int
 )
 
-// ==================== PAQUET RÉSEAU ====================
+data class FileChunkInfo(
+    val transferId: String,
+    val chunkIndex: Int,
+    val offset: Long,
+    val length: Int
+)
 
+data class ClientInfo(val id: String, val pseudo: String, val ip: String)
+
+// ==================== PAQUET RÉSEAU ====================
 data class MeshPacket(
     val id: String = UUID.randomUUID().toString(),
     val senderId: String,
@@ -56,17 +62,21 @@ data class MeshPacket(
     val newGoInfo: GoInfo? = null,
     val relayInfo: RelayInfo? = null,
     val hierarchyInfo: HierarchyInfo? = null,
-    val clientList: List<ClientInfo>? = null
+    val clientList: List<ClientInfo>? = null,
+    val fileTransferStart: FileTransferStart? = null,
+    val fileChunk: FileChunkInfo? = null,
+    val fileChunkData: ByteArray? = null,
+    val transferId: String? = null,
+    val chunkIndex: Int = -1
 ) {
     override fun equals(other: Any?): Boolean = other is MeshPacket && id == other.id
     override fun hashCode(): Int = id.hashCode()
 }
 
+// ==================== AUTRES CLASSES ====================
 data class GoInfo(val goId: String, val goPseudo: String, val goAddress: String, val goPriority: Long, val clientCount: Int)
 data class RelayInfo(val relayId: String, val relayAddress: String, val relayPseudo: String, val relayBleAddress: String?, val supportedClients: List<String>)
 data class HierarchyInfo(val superGoId: String, val superGoAddress: String, val subGroupId: String, val isSubGo: Boolean = false)
-
-// ==================== ROUTAGE BAYÉSIEN ====================
 
 data class RoutingEntry(
     val destinationId: String,
@@ -101,8 +111,6 @@ data class RoutingEntry(
     }
 }
 
-// ==================== NŒUD POUR L’UI ====================
-
 data class MeshNode(
     val deviceId: String,
     val deviceName: String,
@@ -121,8 +129,6 @@ data class MeshNode(
     val ip: String? = null,
     val isConnected: Boolean = true
 )
-
-// ==================== MESSAGE POUR L’UI ====================
 
 data class ChatMessage(
     val id: String,

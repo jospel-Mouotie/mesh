@@ -87,7 +87,6 @@ class MainActivity : ComponentActivity() {
     private var myId       by mutableStateOf("")
     private var myPseudo   by mutableStateOf("")
     private var isMeshActive    by mutableStateOf(false)
-    private var selectedNodeId  by mutableStateOf<String?>(null)
     private var networkStatus   by mutableStateOf("🔄 Initialisation...")
     private var showNetworkMap  by mutableStateOf(false)
     private var selectedChatId  by mutableStateOf<String?>(null)
@@ -140,7 +139,7 @@ class MainActivity : ComponentActivity() {
     private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
-        uri?.let { sendFileMessage(it) }
+        uri?.let { sendFileMessage(uri) }
     }
 
     private val imagePickerLauncher = registerForActivityResult(
@@ -178,6 +177,7 @@ class MainActivity : ComponentActivity() {
             if (uriStr != null) backgroundImageUri = Uri.parse(uriStr)
 
             registerReceivers()
+            registerFileTransferReceivers()
             loadPersistedMessages()
 
             setContent {
@@ -243,7 +243,8 @@ class MainActivity : ComponentActivity() {
                                         backgroundType = "color"
                                         prefs.edit().putString("background_type", "color").apply()
                                         prefs.edit().remove("background_image_uri").apply()
-                                    }
+                                    },
+                                    currentImageUri = backgroundImageUri?.toString()
                                 )
                                 else -> MainMeshScreen(
                                     myId = myId,
@@ -259,6 +260,9 @@ class MainActivity : ComponentActivity() {
                                     playingAudioId = playingAudioId,
                                     isRecording = isRecording,
                                     replyingToMessage = replyingToMessage,
+                                    backgroundColor = backgroundColor,
+                                    backgroundImageUri = backgroundImageUri,
+                                    backgroundType = backgroundType,
                                     onChatSelected = { selectedChatId = it },
                                     onMenuClick = { /* handled by scaffold */ },
                                     onMapToggle = { showNetworkMap = !showNetworkMap },
@@ -288,7 +292,9 @@ class MainActivity : ComponentActivity() {
                                         }
                                     },
                                     onOpenSettings = { showSettings = true },
-                                    onOpenFile = { openFile(it) }
+                                    onOpenFile = { openFile(it) },
+                                    onBecomeGO = { becomeGroupOwner() },
+                                    onJoinGroup = { joinExistingGroup() }
                                 )
                             }
 
@@ -343,6 +349,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         isDestroyed.set(true)
         try { unregisterReceiver(meshReceiver) } catch (e: Exception) { }
+        try { unregisterReceiver(fileTransferReceiver) } catch (e: Exception) { }
         try { mediaPlayer?.release(); mediaRecorder?.release() } catch (e: Exception) { }
         try { messageStore.close() } catch (e: Exception) { }
         mainHandler.removeCallbacksAndMessages(null)
@@ -392,6 +399,69 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun registerFileTransferReceivers() {
+        val filter = IntentFilter().apply {
+            addAction("FILE_TRANSFER_PROGRESS")
+            addAction("FILE_TRANSFER_COMPLETE")
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(fileTransferReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(fileTransferReceiver, filter, Context.RECEIVER_EXPORTED)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "registerFileTransferReceivers: ${e.message}")
+        }
+    }
+    private val fileTransferReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                "FILE_TRANSFER_PROGRESS" -> {
+                    val destination = intent.getStringExtra("destination") ?: return
+                    val sent = intent.getLongExtra("sent", 0)
+                    val total = intent.getLongExtra("total", 0)
+                    val fileName = intent.getStringExtra("file_name") ?: "fichier"
+                    if (total > 0) {
+                        val percent = (sent * 100 / total).toInt()
+                        runOnUiThread {
+                            // Mettre à jour le statut du message
+                            val msgId = messages.find { it.fileName == fileName && it.isMine }?.id
+                            msgId?.let { updateMessageStatus(it, MessageStatus.SENT) }
+                            Toast.makeText(
+                                this@MainActivity,
+                                "📤 Envoi de $fileName : $percent%",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                }
+                "FILE_TRANSFER_COMPLETE" -> {
+                    val fileName = intent.getStringExtra("file_name") ?: "fichier"
+                    val destination = intent.getStringExtra("destination") ?: return
+                    val filePath = intent.getStringExtra("file_path")
+                    val messageId = intent.getStringExtra("message_id")
+
+                    runOnUiThread {
+                        // Mettre à jour le message avec le vrai chemin
+                        if (filePath != null && messageId != null) {
+                            messages = messages.map { msg ->
+                                if (msg.id == messageId) {
+                                    msg.copy(filePath = filePath, audioPath = filePath, status = MessageStatus.RECEIVED)
+                                } else {
+                                    msg
+                                }
+                            }
+                            // Persister la mise à jour
+                            messageStore.updateStatus(messageId, MessageStatus.RECEIVED)
+                        }
+
+                        Toast.makeText(this@MainActivity, "✅ Transfert terminé : $fileName", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
     private val meshReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (isDestroyed.get()) return
@@ -400,6 +470,17 @@ class MainActivity : ComponentActivity() {
                     try {
                         val id = intent.getStringExtra("id") ?: return
                         val sender = intent.getStringExtra("sender") ?: "Inconnu"
+                        var senderIdRaw = intent.getStringExtra("sender_id") ?: sender
+
+                        // Si senderIdRaw est un pseudo, essayer de trouver l'ID correspondant
+                        if (senderIdRaw == sender && senderIdRaw != myId) {
+                            // Chercher le nœud avec ce pseudo
+                            val node = nodes.values.find { it.pseudo == senderIdRaw }
+                            if (node != null) {
+                                senderIdRaw = node.deviceId
+                            }
+                        }
+
                         val content = intent.getStringExtra("content") ?: ""
                         val receiver = intent.getStringExtra("receiver") ?: "TOUS"
                         val timestamp = intent.getLongExtra("timestamp", System.currentTimeMillis())
@@ -412,34 +493,105 @@ class MainActivity : ComponentActivity() {
                         val replyToId = intent.getStringExtra("reply_to_id")
                         val replyToContent = intent.getStringExtra("reply_to_content")
 
+                        Log.d(TAG, "📨 Message reçu: id=$id, sender=$sender, senderIdRaw=$senderIdRaw, receiver=$receiver, type=$type, myId=$myId")
+
+                        val isForMe = receiver == "TOUS" || receiver == myId || senderIdRaw == myId
+                        val isMine = senderIdRaw == myId
+
+                        if (!isForMe) {
+                            Log.d(TAG, "Message ignoré (pas pour moi)")
+                            return
+                        }
+
                         if (messages.any { it.id == id }) return
 
                         val msg = ChatMessage(
-                            id = id, sender = sender, content = content, isMine = false,
+                            id = id, sender = sender, content = content, isMine = isMine,
                             time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp)),
                             status = MessageStatus.RECEIVED, type = type,
-                            receiverId = receiver, senderIdRaw = sender,
+                            receiverId = receiver, senderIdRaw = senderIdRaw,
                             timestamp = timestamp,
                             audioPath = audioPath, filePath = filePath,
                             fileName = fileName, fileSize = fileSize,
                             replyToId = replyToId, replyToContent = replyToContent
                         )
-                        messages = messages + msg
-                        persistMessage(msg)
-                        if (messages.size > 500) {
-                            val oldest = messages.firstOrNull()?.id
-                            oldest?.let { messageStore.delete(it) }
-                            messages = messages.drop(1)
-                        }
-                        showMessageNotification(msg)
 
-                    } catch (e: Exception) { Log.e(TAG, "MESH_MESSAGE_RECEIVED: ${e.message}", e) }
+                        runOnUiThread {
+                            messages = messages + msg
+                            persistMessage(msg)
+                            showMessageNotification(msg)
+                            Log.d(TAG, "✅ Message ajouté: sender=$sender, senderIdRaw=$senderIdRaw, isMine=$isMine, receiver=$receiver")
+                        }
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "MESH_MESSAGE_RECEIVED: ${e.message}", e)
+                    }
+                }     "MESH_MESSAGE_RECEIVED" -> {
+                    try {
+                        val id = intent.getStringExtra("id") ?: return
+                        val sender = intent.getStringExtra("sender") ?: "Inconnu"
+                        val senderIdRaw = intent.getStringExtra("sender_id") ?: sender  // ← Utiliser sender_id
+                        val content = intent.getStringExtra("content") ?: ""
+                        val receiver = intent.getStringExtra("receiver") ?: "TOUS"
+                        val timestamp = intent.getLongExtra("timestamp", System.currentTimeMillis())
+                        val typeStr = intent.getStringExtra("type") ?: "MESSAGE"
+                        val type = try { PacketType.valueOf(typeStr) } catch (e: Exception) { PacketType.MESSAGE }
+                        val audioPath = intent.getStringExtra("audio_path")
+                        val filePath = intent.getStringExtra("file_path")
+                        val fileName = intent.getStringExtra("file_name")
+                        val fileSize = intent.getLongExtra("file_size", 0)
+                        val replyToId = intent.getStringExtra("reply_to_id")
+                        val replyToContent = intent.getStringExtra("reply_to_content")
+
+                        Log.d(TAG, "📨 Message reçu: id=$id, sender=$sender, senderIdRaw=$senderIdRaw, receiver=$receiver, type=$type, myId=$myId")
+
+                        // Un message est pour moi si :
+                        // - C'est un broadcast (receiver == "TOUS")
+                        // - Je suis le destinataire (receiver == myId)
+                        // - Je suis l'expéditeur (senderIdRaw == myId)
+                        val isForMe = receiver == "TOUS" || receiver == myId || senderIdRaw == myId
+
+                        // Un message est de moi si l'expéditeur est moi
+                        val isMine = senderIdRaw == myId
+
+                        if (!isForMe) {
+                            Log.d(TAG, "Message ignoré (pas pour moi): receiver=$receiver, senderIdRaw=$senderIdRaw")
+                            return
+                        }
+
+                        if (messages.any { it.id == id }) return
+
+                        val msg = ChatMessage(
+                            id = id, sender = sender, content = content, isMine = isMine,
+                            time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp)),
+                            status = MessageStatus.RECEIVED, type = type,
+                            receiverId = receiver, senderIdRaw = senderIdRaw,  // ← Utiliser le bon ID
+                            timestamp = timestamp,
+                            audioPath = audioPath, filePath = filePath,
+                            fileName = fileName, fileSize = fileSize,
+                            replyToId = replyToId, replyToContent = replyToContent
+                        )
+
+                        runOnUiThread {
+                            messages = messages + msg
+                            persistMessage(msg)
+                            showMessageNotification(msg)
+                            Log.d(TAG, "✅ Message ajouté: sender=$sender, senderIdRaw=$senderIdRaw, isMine=$isMine, receiver=$receiver")
+                        }
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "MESH_MESSAGE_RECEIVED: ${e.message}", e)
+                    }
                 }
 
                 "MESH_STATUS_CHANGED" -> {
-                    networkStatus = intent.getStringExtra("status") ?: ""
-                    isMeshActive = networkStatus.contains("✅") || networkStatus.contains("actif") ||
-                            networkStatus.contains("Relais") || networkStatus.contains("voisin")
+                    val status = intent.getStringExtra("status") ?: ""
+                    Log.d(TAG, "📡 MESH_STATUS_CHANGED: $status")
+                    runOnUiThread {
+                        networkStatus = status
+                        isMeshActive = status.contains("✅") || status.contains("actif") ||
+                                status.contains("Relais") || status.contains("voisin") || status.contains("connecté")
+                    }
                 }
 
                 "MESH_NODE_DISCOVERED" -> {
@@ -458,37 +610,59 @@ class MainActivity : ComponentActivity() {
                         10f
                     }
 
-                    val existing = nodes[nodeId]
-                    if (existing != null) {
-                        nodes[nodeId] = existing.copy(
-                            lastSeen = System.currentTimeMillis(),
-                            estimatedDistance = if (distance > 0) distance else existing.estimatedDistance,
-                            connectionType = ct,
-                            isRelay = isRelay,
-                            isSubGo = isSubGo,
-                            isConnected = true
-                        )
-                    } else {
-                        nodes[nodeId] = MeshNode(
-                            deviceId = nodeId, deviceName = nodeName, pseudo = nodePseudo,
-                            connectionType = ct, lastSeen = System.currentTimeMillis(),
-                            estimatedDistance = distance, isRelay = isRelay, isSubGo = isSubGo,
-                            isConnected = true
-                        )
+                    Log.d(TAG, "✅ Nœud découvert: $nodePseudo ($nodeId) type=$ct distance=$distance m")
+
+                    runOnUiThread {
+                        val existing = nodes[nodeId]
+                        if (existing != null) {
+                            nodes[nodeId] = existing.copy(
+                                lastSeen = System.currentTimeMillis(),
+                                estimatedDistance = if (distance > 0) distance else existing.estimatedDistance,
+                                connectionType = ct,
+                                isRelay = isRelay,
+                                isSubGo = isSubGo,
+                                isConnected = true
+                            )
+                        } else {
+                            nodes[nodeId] = MeshNode(
+                                deviceId = nodeId, deviceName = nodeName, pseudo = nodePseudo,
+                                connectionType = ct, lastSeen = System.currentTimeMillis(),
+                                estimatedDistance = distance, isRelay = isRelay, isSubGo = isSubGo,
+                                isConnected = true
+                            )
+                        }
                     }
-                    Log.d(TAG, "✅ Nœud ajouté: $nodePseudo ($nodeId) type=$ct distance=$distance m")
                 }
 
-                "MESH_NODE_LOST" -> { nodes.remove(intent.getStringExtra("node_id") ?: return) }
+                "MESH_NODE_LOST" -> {
+                    val nodeId = intent.getStringExtra("node_id") ?: return
+                    Log.d(TAG, "❌ Nœud perdu: $nodeId")
+                    runOnUiThread {
+                        nodes.remove(nodeId)
+                    }
+                }
 
-                "MESH_ERROR" -> { errorMessage = "⚠️ ${intent.getStringExtra("error")}" }
+                "MESH_ERROR" -> {
+                    val error = intent.getStringExtra("error") ?: "Erreur inconnue"
+                    Log.e(TAG, "⚠️ MESH_ERROR: $error")
+                    runOnUiThread {
+                        errorMessage = "⚠️ $error"
+                    }
+                }
 
                 "MESH_NODE_RELIABILITY_UPDATE" -> {
                     val nodeId = intent.getStringExtra("node_id") ?: return
                     val reliability = intent.getDoubleExtra("reliability", 0.5)
-                    nodes[nodeId]?.let { existing ->
-                        nodes[nodeId] = existing.copy(bayesianReliability = reliability)
-                        Log.d(TAG, "📊 Fiabilité bayésienne mise à jour pour $nodeId : $reliability")
+                    val distance = (100f * (1f - reliability.toFloat())).coerceIn(1f, 100f)
+
+                    runOnUiThread {
+                        nodes[nodeId]?.let { existing ->
+                            nodes[nodeId] = existing.copy(
+                                bayesianReliability = reliability,
+                                estimatedDistance = distance
+                            )
+                            Log.d(TAG, "📊 Fiabilité mise à jour: $nodeId = ${String.format("%.2f", reliability)} → distance: ${distance.toInt()}m")
+                        }
                     }
                 }
             }
@@ -553,7 +727,27 @@ class MainActivity : ComponentActivity() {
         try {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
             networkStatus = "🔄 Connexion..."
-        } catch (e: Exception) { errorMessage = "❌ ${e.message}"; Log.e(TAG, "startMeshService", e) }
+        } catch (e: Exception) {
+            errorMessage = "❌ ${e.message}"
+            Log.e(TAG, "startMeshService", e)
+        }
+    }
+
+    // ==================== ACTIONS GROUPE ====================
+    private fun becomeGroupOwner() {
+        val intent = Intent(this, MeshService::class.java).apply {
+            action = "ACTION_BECOME_GO"
+        }
+        startServiceCompat(intent)
+        Toast.makeText(this, "Tentative de création d'un nouveau groupe...", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun joinExistingGroup() {
+        val intent = Intent(this, MeshService::class.java).apply {
+            action = "ACTION_JOIN_GROUP"
+        }
+        startServiceCompat(intent)
+        Toast.makeText(this, "Recherche d'un groupe à rejoindre...", Toast.LENGTH_SHORT).show()
     }
 
     // ==================== ENVOI ====================
@@ -598,85 +792,119 @@ class MainActivity : ComponentActivity() {
             errorMessage = "Fichier audio introuvable"
             return
         }
+
+        if (receiver == "TOUS") {
+            errorMessage = "Les messages vocaux ne peuvent être envoyés qu'en privé"
+            return
+        }
+
         val id = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(now))
 
-        val actualReceiver = if (receiver == "PUBLIC") "TOUS" else receiver
-
-        val durationSec = try {
-            val mmr = android.media.MediaMetadataRetriever()
-            mmr.setDataSource(file.absolutePath)
-            val durationMs = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0
-            mmr.release()
-            (durationMs / 1000).coerceAtLeast(1)
-        } catch (e: Exception) {
-            (file.length() / 1525).toInt().coerceAtLeast(1)
-        }
-
         val msg = ChatMessage(
-            id = id, sender = "Moi", content = "${durationSec}s", isMine = true,
+            id = id, sender = "Moi", content = "${file.length() / 1024} Ko", isMine = true,
             time = time, status = MessageStatus.SENDING,
-            receiverId = actualReceiver, senderIdRaw = myId, type = PacketType.AUDIO,
-            audioPath = file.absolutePath, timestamp = now
+            receiverId = receiver, senderIdRaw = myId, type = PacketType.AUDIO,
+            audioPath = file.absolutePath, timestamp = now,
+            fileName = "audio_${System.currentTimeMillis()}.3gp",
+            fileSize = file.length()
         )
-        messages = messages + msg
-        persistMessage(msg)
 
-        val audioData = file.readBytes()
-        val intent = Intent(this, MeshService::class.java).apply {
-            action = "ACTION_SEND_MESSAGE"
-            putExtra("id", id); putExtra("content", "Audio ${durationSec}s")
-            putExtra("receiver", actualReceiver); putExtra("type", PacketType.AUDIO.name)
-            putExtra("audio_data", audioData)
+        runOnUiThread {
+            messages = messages + msg
+            persistMessage(msg)
         }
-        startServiceCompat(intent)
-        lifecycleScope.launch { delay(1500); updateMessageStatus(id, MessageStatus.SENT) }
+
+        sendLargeFileViaService(Uri.fromFile(file), "audio_${System.currentTimeMillis()}.3gp", file.length(), true)
     }
 
     private fun sendFileMessage(uri: Uri) {
-        val id = UUID.randomUUID().toString()
-        val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
-        val receiver = selectedNodeId ?: "TOUS"
-        val actualReceiver = if (receiver == "PUBLIC") "TOUS" else receiver
+        val receiver = selectedChatId ?: "TOUS"
+
+        if (receiver == "TOUS") {
+            errorMessage = "Les fichiers ne peuvent être envoyés qu'en privé"
+            return
+        }
 
         val cursor = contentResolver.query(uri, null, null, null, null)
         val fileName = cursor?.use {
             if (it.moveToFirst()) it.getString(it.getColumnIndexOrThrow("_display_name")) else "fichier"
-        } ?: "fichier_${id.take(6)}"
+        } ?: "fichier_${UUID.randomUUID().toString().take(6)}"
         cursor?.close()
 
+        val fileSize = contentResolver.openFileDescriptor(uri, "r")?.statSize ?: 0L
+        if (fileSize == 0L) {
+            errorMessage = "Fichier vide"
+            return
+        }
+
+        sendLargeFileViaService(uri, fileName, fileSize, isAudio = false)
+    }
+
+    private fun sendLargeFileViaService(uri: Uri, fileName: String, fileSize: Long, isAudio: Boolean = false) {
+        val receiver = selectedChatId ?: "TOUS"
+
+        if (receiver == "TOUS") {
+            runOnUiThread {
+                errorMessage = "Les fichiers ne peuvent être envoyés qu'en privé (sélectionnez un contact)"
+            }
+            return
+        }
+
+        Log.i(TAG, "📤 sendLargeFileViaService: receiver=$receiver, fileName=$fileName, fileSize=$fileSize")
+
+        val id = UUID.randomUUID().toString()
+        val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+
+        // NE PAS créer de message avec un chemin temporaire
+        // Le message sera créé après le transfert réussi
+
         lifecycleScope.launch(Dispatchers.IO) {
+            val tempFile = File(cacheDir, "to_send_${UUID.randomUUID()}")
             try {
-                val fileData = contentResolver.openInputStream(uri)?.readBytes()
-                if (fileData == null) { withContext(Dispatchers.Main) { errorMessage = "❌ Impossible de lire le fichier" }; return@launch }
-                if (fileData.size > 15 * 1024 * 1024) { withContext(Dispatchers.Main) { errorMessage = "❌ Fichier trop grand (max 15 Mo)" }; return@launch }
+                contentResolver.openInputStream(uri)?.use { input ->
+                    tempFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
 
-                val localFile = File(filesDir, "sent_$fileName")
-                localFile.writeBytes(fileData)
+                Log.i(TAG, "✅ Fichier temporaire créé: ${tempFile.absolutePath}")
 
-                withContext(Dispatchers.Main) {
-                    val msg = ChatMessage(
-                        id = id, sender = "Moi", content = fileName, isMine = true,
-                        time = time, status = MessageStatus.SENDING,
-                        receiverId = actualReceiver, senderIdRaw = myId, type = PacketType.FILE,
-                        filePath = localFile.absolutePath, fileName = fileName, fileSize = fileData.size.toLong()
-                    )
+                // Créer le message APRÈS avoir le vrai chemin
+                val msg = ChatMessage(
+                    id = id, sender = "Moi", content = fileName, isMine = true,
+                    time = time, status = MessageStatus.SENDING,
+                    receiverId = receiver, senderIdRaw = myId,
+                    type = if (isAudio) PacketType.AUDIO else PacketType.FILE,
+                    filePath = if (!isAudio) tempFile.absolutePath else null,
+                    audioPath = if (isAudio) tempFile.absolutePath else null,
+                    fileName = fileName, fileSize = fileSize
+                )
+
+                runOnUiThread {
                     messages = messages + msg
                     persistMessage(msg)
-
-                    val intent = Intent(this@MainActivity, MeshService::class.java).apply {
-                        action = "ACTION_SEND_MESSAGE"
-                        putExtra("id", id); putExtra("content", fileName)
-                        putExtra("receiver", actualReceiver); putExtra("type", PacketType.FILE.name)
-                        putExtra("file_name", fileName); putExtra("file_size", fileData.size.toLong())
-                        putExtra("file_data", fileData)
-                    }
-                    startServiceCompat(intent)
-                    delay(1500); updateMessageStatus(id, MessageStatus.SENT)
+                    Toast.makeText(this@MainActivity, "📤 Envoi de $fileName en cours...", Toast.LENGTH_SHORT).show()
                 }
+
+                val intent = Intent(this@MainActivity, MeshService::class.java).apply {
+                    action = "ACTION_SEND_LARGE_FILE"
+                    putExtra("destination", receiver)
+                    putExtra("file_path", tempFile.absolutePath)
+                    putExtra("file_name", fileName)
+                    putExtra("file_size", fileSize)
+                    putExtra("message_id", id)
+                    putExtra("is_audio", isAudio)
+                }
+                startServiceCompat(intent)
+
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { errorMessage = "❌ Erreur fichier: ${e.message}" }
+                Log.e(TAG, "❌ Erreur préparation fichier: ${e.message}", e)
+                runOnUiThread {
+                    errorMessage = "Erreur préparation fichier: ${e.message}"
+                }
+                tempFile.delete()
             }
         }
     }
@@ -684,7 +912,9 @@ class MainActivity : ComponentActivity() {
     private fun startServiceCompat(intent: Intent) {
         try {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
-        } catch (e: Exception) { errorMessage = "❌ ${e.message}" }
+        } catch (e: Exception) {
+            errorMessage = "❌ ${e.message}"
+        }
     }
 
     private fun updateMessageStatus(id: String, status: MessageStatus) {
@@ -697,7 +927,8 @@ class MainActivity : ComponentActivity() {
     // ==================== AUDIO ====================
     private fun startRecording() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            errorMessage = "🎤 Permission microphone requise"; return
+            errorMessage = "🎤 Permission microphone requise"
+            return
         }
         try {
             audioFile = File(cacheDir, "audio_${System.currentTimeMillis()}.3gp")
@@ -706,49 +937,72 @@ class MainActivity : ComponentActivity() {
                 setOutputFormat(MediaRecorder.OutputFormat.THREE_GPP)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB)
                 setOutputFile(audioFile!!.absolutePath)
-                prepare(); start()
+                prepare()
+                start()
             }
             isRecording = true
-        } catch (e: IOException) { errorMessage = "🎤 Erreur enregistrement: ${e.message}" }
+        } catch (e: IOException) {
+            errorMessage = "🎤 Erreur enregistrement: ${e.message}"
+        }
     }
 
     private fun stopRecording() {
         try {
             mediaRecorder?.apply { stop(); release() }
-            mediaRecorder = null; isRecording = false
-            audioFile?.let { if (it.exists() && it.length() > 0) sendAudioMessage(it, selectedNodeId ?: "TOUS") }
-        } catch (e: Exception) { errorMessage = "Erreur arrêt: ${e.message}"; isRecording = false }
+            mediaRecorder = null
+            isRecording = false
+            val receiver = selectedChatId ?: "TOUS"
+            audioFile?.let {
+                if (it.exists() && it.length() > 0) {
+                    sendAudioMessage(it, receiver)
+                }
+            }
+        } catch (e: Exception) {
+            errorMessage = "Erreur arrêt: ${e.message}"
+            isRecording = false
+        }
     }
-
     private fun playAudio(msg: ChatMessage) {
         try {
             if (playingAudioId == msg.id) {
-                mediaPlayer?.stop(); mediaPlayer?.release(); mediaPlayer = null; playingAudioId = null
+                mediaPlayer?.stop()
+                mediaPlayer?.release()
+                mediaPlayer = null
+                playingAudioId = null
                 return
             }
-            mediaPlayer?.stop(); mediaPlayer?.release(); mediaPlayer = null
 
-            val path = msg.audioPath
-            if (path.isNullOrEmpty()) {
+            mediaPlayer?.stop()
+            mediaPlayer?.release()
+            mediaPlayer = null
+
+            // Chercher le chemin dans l'ordre : audioPath puis filePath
+            var path = msg.audioPath
+            if (path.isNullOrEmpty() || path == "temp") {
+                path = msg.filePath
+            }
+
+            if (path.isNullOrEmpty() || path == "temp") {
                 errorMessage = "Chemin audio manquant"
+                Log.e(TAG, "playAudio: chemin manquant pour message ${msg.id}")
                 return
             }
+
             val file = File(path)
             if (!file.exists()) {
+                // Essayer de chercher dans le cache
+                val cacheFile = File(cacheDir, file.name)
+                if (cacheFile.exists()) {
+                    playAudioFile(cacheFile, msg.id)
+                    return
+                }
                 errorMessage = "Fichier audio introuvable : $path"
+                Log.e(TAG, "playAudio: fichier non trouvé: $path")
                 return
             }
-            mediaPlayer = MediaPlayer().apply {
-                setDataSource(path)
-                prepare()
-                start()
-                setOnCompletionListener {
-                    playingAudioId = null
-                    release()
-                    mediaPlayer = null
-                }
-            }
-            playingAudioId = msg.id
+
+            playAudioFile(file, msg.id)
+
         } catch (e: Exception) {
             errorMessage = "Erreur lecture: ${e.message}"
             playingAudioId = null
@@ -757,26 +1011,59 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun playAudioFile(file: File, msgId: String) {
+        mediaPlayer = MediaPlayer().apply {
+            setDataSource(file.absolutePath)
+            prepare()
+            start()
+            setOnCompletionListener {
+                playingAudioId = null
+                release()
+                mediaPlayer = null
+            }
+        }
+        playingAudioId = msgId
+    }
     private fun openFile(msg: ChatMessage) {
-        val path = msg.filePath
-        if (path.isNullOrEmpty()) {
+        var path = msg.filePath
+        if (path.isNullOrEmpty() || path == "temp") {
+            path = msg.audioPath
+        }
+
+        if (path.isNullOrEmpty() || path == "temp") {
             errorMessage = "Chemin fichier manquant"
+            Log.e(TAG, "openFile: chemin manquant pour message ${msg.id}")
             return
         }
+
         val file = File(path)
         if (!file.exists()) {
+            // Essayer de chercher dans le cache
+            val cacheFile = File(cacheDir, file.name)
+            if (cacheFile.exists()) {
+                openFileWithIntent(cacheFile)
+                return
+            }
+
             errorMessage = "Fichier introuvable : $path"
+            Log.e(TAG, "openFile: fichier non trouvé: $path")
             return
         }
-        val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, contentResolver.getType(uri) ?: "*/*")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
+
+        openFileWithIntent(file)
+    }
+
+    private fun openFileWithIntent(file: File) {
         try {
+            val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, contentResolver.getType(uri) ?: "*/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
             startActivity(intent)
         } catch (e: Exception) {
             errorMessage = "Aucune application pour ouvrir ce fichier"
+            Log.e(TAG, "openFileWithIntent: ${e.message}", e)
         }
     }
 
@@ -812,7 +1099,8 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 26) {
             val channel = NotificationChannel(CHANNEL_ID, "Messages Mesh", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Nouveaux messages"
-                enableVibration(true); vibrationPattern = longArrayOf(0, 400, 200, 400)
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 400, 200, 400)
             }
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }

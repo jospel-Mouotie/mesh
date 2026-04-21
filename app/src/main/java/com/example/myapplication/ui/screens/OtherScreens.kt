@@ -1,12 +1,10 @@
 package com.example.myapplication.ui.screens
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,9 +17,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowForward
-import androidx.compose.material.icons.rounded.Forum
-import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material3.Button
@@ -30,7 +25,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Snackbar
@@ -49,8 +43,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.myapplication.ConnectionType
-import com.example.myapplication.MeshNode
 
 @Composable
 fun PseudoEntryScreen(myId: String, onJoin: (String) -> Unit) {
@@ -147,75 +139,3 @@ fun ErrorSnackbar(message: String, onDismiss: () -> Unit) {
     }
 }
 
-@Composable
-fun EmptyChatState(chatId: String) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        val icon = if (chatId == "TOUS") Icons.Rounded.Groups else Icons.Rounded.Forum
-        val text = if (chatId == "TOUS") {
-            "Canal Public Mesh\nTous les appareils à proximité recevront vos messages."
-        } else {
-            "Conversation Privée P2P\nLes messages sont routés directement vers ce nœud."
-        }
-
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            modifier = Modifier.size(80.dp),
-            tint = Color.LightGray.copy(alpha = 0.5f)
-        )
-        Spacer(Modifier.height(16.dp))
-        Text(
-            text = text,
-            color = Color.Gray,
-            textAlign = TextAlign.Center,
-            style = MaterialTheme.typography.bodyMedium
-        )
-    }
-}
-
-@Composable
-fun NetworkMapBar(nodes: Map<String, MeshNode>, myPseudo: String) {
-    Card(
-        modifier = Modifier.fillMaxWidth().padding(8.dp).height(110.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        shape = RoundedCornerShape(16.dp),
-        elevation = CardDefaults.cardElevation(2.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Surface(shape = CircleShape, color = Color(0xFF1A73E8).copy(0.2f),
-                border = BorderStroke(2.dp, Color(0xFF1A73E8)), modifier = Modifier.size(52.dp)) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(myPseudo.take(1).uppercase(), color = Color(0xFF1A73E8), fontWeight = FontWeight.Bold)
-                }
-            }
-            nodes.values.take(4).forEach { node ->
-                Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, tint = Color(0xFF5F6368), modifier = Modifier.size(14.dp))
-                val isWifi = node.connectionType == ConnectionType.WIFI_DIRECT
-                Surface(shape = CircleShape,
-                    color = (if (isWifi) Color(0xFF1A73E8) else Color(0xFF8E24AA)).copy(0.15f),
-                    border = BorderStroke(1.5.dp, if (isWifi) Color(0xFF1A73E8) else Color(0xFF8E24AA)),
-                    modifier = Modifier.size(42.dp)) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(node.pseudo.take(1).uppercase(), color = if (isWifi) Color(0xFF1A73E8) else Color(0xFF8E24AA), fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    }
-                }
-            }
-            if (nodes.size > 4) {
-                Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, tint = Color(0xFF5F6368), modifier = Modifier.size(14.dp))
-                Surface(shape = CircleShape, color = Color(0xFFF0F2F5), modifier = Modifier.size(38.dp)) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text("+${nodes.size - 4}", color = Color(0xFF5F6368), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        }
-    }
-}

@@ -24,9 +24,12 @@ import com.google.gson.JsonSerializer
 import java.io.BufferedReader
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.io.InputStreamReader
+import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.io.PrintWriter
+import java.io.RandomAccessFile
 import java.net.BindException
 import java.net.ConnectException
 import java.net.Inet4Address
@@ -46,6 +49,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.min
 
 class MeshManager(
     private val context: Context,
@@ -99,6 +103,10 @@ class MeshManager(
     // Ensemble des appareils déjà connectés pour éviter les reconnexions
     private val previouslyConnectedDevices = mutableSetOf<String>()
 
+    // Transferts de fichiers actifs
+    private val activeFileTransfers = ConcurrentHashMap<String, FileTransferSession>()
+    private var fileTransferServer: ServerSocket? = null
+
     private val executor = Executors.newCachedThreadPool()
     private val heartbeatExecutor = Executors.newSingleThreadScheduledExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -110,8 +118,32 @@ class MeshManager(
         var lastSeen: Long = System.currentTimeMillis(),
         var isConnected: Boolean = false,
         var isDirectNeighbor: Boolean = false,
-        var hopDistance: Int = Int.MAX_VALUE
+        var hopDistance: Int = Int.MAX_VALUE,
+        var bayesianReliability: Double = 0.5,
+        var estimatedDistance: Float = 50f  // Distance par défaut: 50 mètres
     )
+
+    private inner class FileTransferSession(
+        val transferId: String,
+        val destinationId: String,
+        val fileName: String,
+        val fileSize: Long,
+        val totalChunks: Int,
+        val chunkSize: Int,
+        var currentChunk: Int = 0,
+        var socket: Socket? = null,
+        var outputStream: OutputStream? = null,
+        var inputStream: InputStream? = null,
+        var fileRaf: RandomAccessFile? = null,
+        var isSender: Boolean = true
+    ) {
+        fun close() {
+            try { socket?.close() } catch (e: Exception) {}
+            try { outputStream?.close() } catch (e: Exception) {}
+            try { inputStream?.close() } catch (e: Exception) {}
+            try { fileRaf?.close() } catch (e: Exception) {}
+        }
+    }
 
     private val myIp: String by lazy { getLocalIpAddress() }
 
@@ -137,6 +169,7 @@ class MeshManager(
             )
 
             startTcpServer()
+            startFileTransferServer()  // ← DOIT ÊTRE PRÉSENTE
             startWifiDirect()
             startHeartbeat()
             startRouteUpdatePropagation()
@@ -149,7 +182,321 @@ class MeshManager(
         }
     }
 
-    // ==================== WIFI DIRECT (sans suppression systématique du groupe) ====================
+    // ==================== SERVEUR POUR TRANSFERTS DE FICHIERS ====================
+    private fun startFileTransferServer() {
+        executor.execute {
+            try {
+                fileTransferServer = ServerSocket(0)
+                val actualPort = fileTransferServer!!.localPort
+                Log.i(TAG, "🖧 Serveur transfert fichiers démarré sur port $actualPort")
+
+                while (isRunning.get()) {
+                    val clientSocket = fileTransferServer!!.accept()
+                    Log.i(TAG, "🔥 Nouvelle connexion entrante sur le serveur de fichiers")
+                    executor.execute { handleFileTransferConnection(clientSocket) }
+                }
+            } catch (e: Exception) {
+                if (isRunning.get()) Log.e(TAG, "Erreur serveur fichiers", e)
+            }
+        }
+    }
+
+    private fun handleFileTransferConnection(socket: Socket) {
+        try {
+            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+            val writer = PrintWriter(OutputStreamWriter(socket.getOutputStream()), true)
+            val line = reader.readLine() ?: return
+            val packet = gson.fromJson(line, MeshPacket::class.java)
+            if (packet.type == PacketType.FILE_TRANSFER_START) {
+                acceptFileTransfer(packet, socket, reader, writer)
+            } else {
+                socket.close()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur connexion fichier", e)
+        }
+    }
+
+    // ==================== ENVOI D'UN GROS FICHIER ====================
+    fun startLargeFileSend(
+        destinationId: String,
+        filePath: String,
+        fileName: String,
+        fileSize: Long,
+        onProgress: (sentBytes: Long, total: Long) -> Unit,
+        onComplete: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        Log.i(TAG, "📤 startLargeFileSend appelé")
+        Log.i(TAG, "   destinationId: $destinationId")
+        Log.i(TAG, "   filePath: $filePath")
+        Log.i(TAG, "   fileName: $fileName")
+        Log.i(TAG, "   fileSize: $fileSize")
+
+        // Vérifier si la destination est connectée
+        if (!tcpConnections.containsKey(destinationId)) {
+            Log.e(TAG, "❌ Destination $destinationId non connectée!")
+            Log.e(TAG, "   Connexions actives: ${tcpConnections.keys}")
+            onError("Destinataire non connecté")
+            return
+        }
+
+        val transferId = UUID.randomUUID().toString()
+        val chunkSize = 256 * 1024
+        val totalChunks = ((fileSize + chunkSize - 1) / chunkSize).toInt()
+        Log.i(TAG, "   transferId: $transferId")
+        Log.i(TAG, "   totalChunks: $totalChunks")
+
+        executor.execute {
+            var serverSocketForTransfer: ServerSocket? = null
+            try {
+                serverSocketForTransfer = ServerSocket(0)
+                val actualPort = serverSocketForTransfer.localPort
+                Log.i(TAG, "🔌 Port dynamique pour transfert $transferId : $actualPort")
+
+                val startPacket = MeshPacket(
+                    id = UUID.randomUUID().toString(),
+                    senderId = myId,
+                    senderPseudo = myPseudo,
+                    receiver = destinationId,
+                    content = "FILE_TRANSFER_START",
+                    type = PacketType.FILE_TRANSFER_START,
+                    timestamp = System.currentTimeMillis(),
+                    fileTransferStart = FileTransferStart(
+                        transferId = transferId,
+                        fileName = fileName,
+                        fileSize = fileSize,
+                        totalChunks = totalChunks,
+                        chunkSize = chunkSize,
+                        senderPort = actualPort
+                    )
+                )
+
+                Log.i(TAG, "📡 Envoi du paquet FILE_TRANSFER_START à $destinationId")
+                sendPacket(startPacket)
+
+                Log.i(TAG, "⏳ Attente de connexion du destinataire sur le port $actualPort...")
+                serverSocketForTransfer.soTimeout = 30000
+                val dataSocket = serverSocketForTransfer.accept()
+                Log.i(TAG, "✅ Connexion acceptée du destinataire!")
+
+                val output = dataSocket.getOutputStream()
+                val fileRaf = RandomAccessFile(filePath, "r")
+
+                var sentBytes = 0L
+                for (chunkIdx in 0 until totalChunks) {
+                    val offset = chunkIdx.toLong() * chunkSize
+                    val remaining = fileSize - offset
+                    val len = min(chunkSize, remaining.toInt())
+                    val buffer = ByteArray(len)
+                    fileRaf.seek(offset)
+                    fileRaf.readFully(buffer)
+
+                    val chunkPacket = MeshPacket(
+                        id = UUID.randomUUID().toString(),
+                        senderId = myId,
+                        senderPseudo = myPseudo,
+                        receiver = destinationId,
+                        content = "FILE_CHUNK",
+                        type = PacketType.FILE_CHUNK,
+                        timestamp = System.currentTimeMillis(),
+                        transferId = transferId,
+                        chunkIndex = chunkIdx,
+                        fileChunk = FileChunkInfo(transferId, chunkIdx, offset, len),
+                        fileChunkData = buffer
+                    )
+                    output.write((gson.toJson(chunkPacket) + "\n").toByteArray())
+                    output.flush()
+
+                    sentBytes += len
+                    onProgress(sentBytes, fileSize)
+                    if (chunkIdx % 10 == 0) {
+                        Log.i(TAG, "📤 Chunk $chunkIdx/${totalChunks} envoyé (${sentBytes}/$fileSize)")
+                    }
+                }
+
+                val completePacket = MeshPacket(
+                    id = UUID.randomUUID().toString(),
+                    senderId = myId,
+                    senderPseudo = myPseudo,
+                    receiver = destinationId,
+                    content = "FILE_TRANSFER_COMPLETE",
+                    type = PacketType.FILE_TRANSFER_COMPLETE,
+                    timestamp = System.currentTimeMillis(),
+                    transferId = transferId
+                )
+                output.write((gson.toJson(completePacket) + "\n").toByteArray())
+                output.flush()
+                Log.i(TAG, "✅ Transfert terminé avec succès!")
+                onComplete()
+
+            } catch (e: SocketTimeoutException) {
+                Log.e(TAG, "❌ Timeout: le destinataire n'a pas accepté la connexion sur le port ${serverSocketForTransfer?.localPort}")
+                onError("Timeout: le destinataire n'a pas accepté la connexion")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Erreur transfert fichier: ${e.message}", e)
+                onError(e.message ?: "Erreur transfert fichier")
+            } finally {
+                serverSocketForTransfer?.close()
+                activeFileTransfers.remove(transferId)?.close()
+            }
+        }
+    }
+    private fun acceptFileTransfer(startPacket: MeshPacket, dataSocket: Socket, reader: BufferedReader, writer: PrintWriter) {
+        val startInfo = startPacket.fileTransferStart ?: return
+        val transferId = startInfo.transferId
+        val senderId = startPacket.senderId
+        val fileName = startInfo.fileName
+        val fileSize = startInfo.fileSize
+        val totalChunks = startInfo.totalChunks
+        val chunkSize = startInfo.chunkSize
+
+        Log.i(TAG, "📥 acceptFileTransfer appelé")
+        Log.i(TAG, "   transferId: $transferId")
+        Log.i(TAG, "   fileName: $fileName")
+        Log.i(TAG, "   fileSize: $fileSize")
+        Log.i(TAG, "   senderId: $senderId")
+
+        executor.execute {
+            var raf: RandomAccessFile? = null
+            try {
+                val tempFile = File(context.cacheDir, "downloading_$transferId")
+                raf = RandomAccessFile(tempFile, "rw")
+                Log.i(TAG, "✅ Fichier temporaire créé: ${tempFile.absolutePath}")
+
+                dataSocket.soTimeout = 60000
+
+                var receivedChunks = 0
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    val packet = gson.fromJson(line, MeshPacket::class.java)
+                    when (packet.type) {
+                        PacketType.FILE_CHUNK -> {
+                            val chunkInfo = packet.fileChunk ?: continue
+                            val data = packet.fileChunkData ?: continue
+                            raf.seek(chunkInfo.offset)
+                            raf.write(data)
+                            receivedChunks++
+                            if (receivedChunks % 10 == 0) {
+                                Log.i(TAG, "📥 Chunk ${chunkInfo.chunkIndex}/${totalChunks} reçu")
+                            }
+                            val ackPacket = MeshPacket(
+                                id = UUID.randomUUID().toString(),
+                                senderId = myId,
+                                senderPseudo = myPseudo,
+                                receiver = senderId,
+                                content = "ACK_CHUNK",
+                                type = PacketType.FILE_CHUNK_ACK,
+                                transferId = transferId,
+                                chunkIndex = packet.chunkIndex
+                            )
+                            writer.println(gson.toJson(ackPacket))
+                            writer.flush()
+                        }
+                        PacketType.FILE_TRANSFER_COMPLETE -> {
+                            val finalFile = File(context.cacheDir, fileName)
+                            tempFile.renameTo(finalFile)
+                            Log.i(TAG, "✅ Fichier reçu et sauvegardé: ${finalFile.absolutePath}")
+                            val chatMsg = ChatMessage(
+                                id = UUID.randomUUID().toString(),
+                                sender = startPacket.senderPseudo,
+                                content = fileName,
+                                isMine = false,
+                                time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()),
+                                status = MessageStatus.RECEIVED,
+                                type = PacketType.FILE,
+                                receiverId = myId,
+                                senderIdRaw = senderId,
+                                filePath = finalFile.absolutePath,
+                                fileName = fileName,
+                                fileSize = fileSize
+                            )
+                            mainHandler.post { onMessageReceived(chatMsg) }
+                            break
+                        }
+                        else -> {
+                            Log.d(TAG, "Ignoring packet type ${packet.type} in file transfer")
+                        }
+                    }
+                }
+            } catch (e: SocketTimeoutException) {
+                Log.e(TAG, "❌ Timeout réception fichier", e)
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Erreur réception fichier", e)
+            } finally {
+                activeFileTransfers.remove(transferId)?.close()
+                try { raf?.close() } catch (e: Exception) {}
+            }
+        }
+    }
+    // ==================== ACTIONS UTILISATEUR ====================
+    fun forceBecomeGroupOwner() {
+        Log.i(TAG, "🔧 Force devenir Group Owner")
+        if (isGroupOwner) {
+            onStatusUpdate("👑 Déjà GO")
+            return
+        }
+        becomeGroupOwner()
+    }
+
+    fun forceJoinExistingGroup() {
+        Log.i(TAG, "🔧 Force rejoindre un groupe existant")
+
+        if (isGroupOwner || isConnectedToGroup) {
+            wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    Log.i(TAG, "✅ Groupe quitté, recherche d'un groupe à rejoindre...")
+                    resetConnectionState()
+                    startDiscovery()
+                    mainHandler.postDelayed({
+                        if (!isConnectedToGroup && !isGroupOwner && !hasDiscoveredPeers()) {
+                            Log.i(TAG, "🔍 Aucun groupe trouvé, je deviens GO")
+                            becomeGroupOwner()
+                        }
+                    }, 10000)
+                }
+                override fun onFailure(reason: Int) {
+                    Log.e(TAG, "❌ Échec départ du groupe: $reason")
+                    resetConnectionState()
+                    startDiscovery()
+                }
+            })
+        } else {
+            startDiscovery()
+            mainHandler.postDelayed({
+                if (!isConnectedToGroup && !isGroupOwner && !hasDiscoveredPeers()) {
+                    Log.i(TAG, "🔍 Aucun groupe trouvé, je deviens GO")
+                    becomeGroupOwner()
+                }
+            }, 10000)
+        }
+    }
+
+    fun forceReconnectTcp() {
+        Log.i(TAG, "🔧 Force reconnexion TCP au GO")
+        if (!isGroupOwner && isConnectedToGroup && groupOwnerIp != null) {
+            tcpConnectInProgress.set(false)
+            connectToGroupOwnerTcp()
+        }
+    }
+
+    private fun resetConnectionState() {
+        isGroupOwner = false
+        isConnectedToGroup = false
+        groupOwnerIp = null
+        isConnecting.set(false)
+        isBecomingGO.set(false)
+        tcpConnectInProgress.set(false)
+        tcpConnections.clear()
+        socketToNodeId.clear()
+        previouslyConnectedDevices.clear()
+    }
+
+    private fun hasDiscoveredPeers(): Boolean {
+        return knownNodes.values.any { it.nodeId != myId && System.currentTimeMillis() - it.lastSeen < 10000 }
+    }
+
+    // ==================== WIFI DIRECT ====================
     private fun startWifiDirect() {
         if (!checkWifiDirectPermission()) {
             Log.e(TAG, "❌ Permission WiFi Direct manquante")
@@ -164,25 +511,43 @@ class MeshManager(
                 object : WifiP2pManager.ChannelListener {
                     override fun onChannelDisconnected() {
                         Log.w(TAG, "⚠️ Channel WiFi Direct déconnecté")
+                        mainHandler.postDelayed({
+                            if (isRunning.get() && channel == null) {
+                                wifiP2pManager?.initialize(context, Looper.getMainLooper(), this)
+                            }
+                        }, 3000)
                     }
                 }
             )
 
             registerWifiReceiver()
 
-            // IMPORTANT : Ne pas supprimer le groupe existant pour éviter de forcer une reconnexion
-            // removeGroupAndWait() est supprimé
+            wifiP2pManager?.requestGroupInfo(channel) { group ->
+                if (group != null && group.networkName != null && group.networkName.isNotEmpty()) {
+                    Log.i(TAG, "📡 Groupe persistant existant: ${group.networkName}")
+                    isConnectedToGroup = true
+                    isGroupOwner = group.isGroupOwner
+                    if (isGroupOwner) {
+                        onStatusUpdate("👑 GO actif (groupe restauré)")
+                    } else {
+                        onStatusUpdate("🔗 Connecté au GO (groupe restauré)")
+                        groupOwnerIp = group.owner?.deviceAddress?.let { getIpFromMac(it) }
+                        if (groupOwnerIp != null) {
+                            mainHandler.postDelayed({ connectToGroupOwnerTcp() }, 2000)
+                        }
+                    }
+                } else {
+                    Log.d(TAG, "📭 Aucun groupe persistant, démarrage normal")
+                    startDiscovery()
 
-            // Démarrer la découverte
-            startDiscovery()
-
-            // Timer pour devenir GO si aucun pair trouvé
-            mainHandler.postDelayed({
-                if (isRunning.get() && !isConnectedToGroup && !isConnecting.get() && !isBecomingGO.get()) {
-                    Log.i(TAG, "⏱️ Aucun pair trouvé après 10s → je deviens Group Owner")
-                    becomeGroupOwner()
+                    mainHandler.postDelayed({
+                        if (isRunning.get() && !isConnectedToGroup && !isConnecting.get() && !isBecomingGO.get()) {
+                            Log.i(TAG, "⏱️ Aucun pair trouvé après 10s → je deviens Group Owner")
+                            becomeGroupOwner()
+                        }
+                    }, 10000)
                 }
-            }, 10000)
+            }
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Erreur init WiFi Direct: ${e.message}", e)
@@ -190,7 +555,34 @@ class MeshManager(
         }
     }
 
-    // Supprimé removeGroupAndWait() car il force une reconnexion à chaque démarrage
+    private fun getIpFromMac(macAddress: String): InetAddress? {
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            if (interfaces != null) {
+                while (interfaces.hasMoreElements()) {
+                    val intf = interfaces.nextElement()
+                    if (intf.isUp && !intf.isLoopback) {
+                        val hardwareAddress = intf.hardwareAddress
+                        if (hardwareAddress != null) {
+                            val mac = hardwareAddress.joinToString(":") { "%02X".format(it) }
+                            if (mac.equals(macAddress, ignoreCase = true)) {
+                                val addresses = intf.inetAddresses
+                                while (addresses.hasMoreElements()) {
+                                    val addr = addresses.nextElement()
+                                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                                        return addr
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur getIpFromMac", e)
+        }
+        return null
+    }
 
     private fun registerWifiReceiver() {
         if (receiverRegistered) return
@@ -252,18 +644,49 @@ class MeshManager(
         if (!checkWifiDirectPermission()) { isBecomingGO.set(false); return }
 
         Log.i(TAG, "👑 Création du groupe WiFi Direct (GO)")
+
+        wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                Log.i(TAG, "✅ Groupe existant supprimé, création du nouveau...")
+                createNewGroup()
+            }
+            override fun onFailure(reason: Int) {
+                Log.e(TAG, "❌ Échec suppression groupe: $reason, tentative directe...")
+                createNewGroup()
+            }
+        })
+    }
+
+    private fun createNewGroup() {
         try {
             wifiP2pManager?.createGroup(channel, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     Log.i(TAG, "✅ Groupe créé — je suis Group Owner")
+                    isGroupOwner = true
+                    isConnectedToGroup = true
                     isBecomingGO.set(false)
+                    onStatusUpdate("👑 Mode GO actif")
                 }
+
                 override fun onFailure(reason: Int) {
                     Log.e(TAG, "❌ createGroup échoué: $reason ${reasonToString(reason)}")
                     isBecomingGO.set(false)
-                    mainHandler.postDelayed({
-                        if (isRunning.get() && !isConnectedToGroup) becomeGroupOwner()
-                    }, 6000)
+
+                    when (reason) {
+                        2 -> {
+                            mainHandler.postDelayed({
+                                if (isRunning.get() && !isConnectedToGroup) {
+                                    Log.i(TAG, "🔄 Nouvelle tentative de création du groupe...")
+                                    becomeGroupOwner()
+                                }
+                            }, 10000)
+                        }
+                        else -> {
+                            mainHandler.postDelayed({
+                                if (isRunning.get() && !isConnectedToGroup) becomeGroupOwner()
+                            }, 5000)
+                        }
+                    }
                 }
             })
         } catch (e: SecurityException) {
@@ -272,7 +695,6 @@ class MeshManager(
         }
     }
 
-    // ==================== BROADCAST RECEIVER ====================
     private val wifiDirectReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             when (intent.action) {
@@ -336,7 +758,6 @@ class MeshManager(
 
                 if (devices.isEmpty()) return@requestPeers
 
-                // Filtrer les appareils déjà connectés pour éviter les reconnexions inutiles
                 val validPeers = devices.filter {
                     it.deviceName != null &&
                             !it.deviceName.contains("HP DeskJet", ignoreCase = true) &&
@@ -349,13 +770,11 @@ class MeshManager(
                     return@requestPeers
                 }
 
-                // Si je suis déjà GO et connecté, ne pas tenter de me reconnecter
                 if (isConnectedToGroup && isGroupOwner) {
                     Log.d(TAG, "GO déjà actif, pas de nouvelle connexion")
                     return@requestPeers
                 }
 
-                // Si je ne suis pas connecté, je me connecte au premier nouveau pair
                 if (!isConnectedToGroup && !isConnecting.get()) {
                     val sorted = validPeers.sortedBy { it.deviceAddress }
                     Log.i(TAG, "📱 Je me connecte au nouveau pair ${sorted.first().deviceName}")
@@ -397,7 +816,6 @@ class MeshManager(
         }
         if (!checkWifiDirectPermission()) { isConnecting.set(false); return }
 
-        // Si déjà dans un groupe, ne pas tenter de connexion supplémentaire
         if (isGroupOwner || isConnectedToGroup) {
             Log.w(TAG, "Déjà dans un groupe, connexion ignorée")
             isConnecting.set(false)
@@ -414,7 +832,6 @@ class MeshManager(
                 override fun onSuccess() {
                     Log.i(TAG, "✅ Connexion WiFi Direct demandée à ${device.deviceName}")
                     onStatusUpdate("🔗 Connexion à ${device.deviceName}...")
-                    // Ajouter aux appareils déjà connectés pour éviter de le redemander
                     previouslyConnectedDevices.add(device.deviceAddress)
                 }
                 override fun onFailure(reason: Int) {
@@ -469,10 +886,9 @@ class MeshManager(
                 if (isGroupOwner) {
                     onStatusUpdate("👑 En attente de clients...")
                 } else {
-                    val goIp = groupOwnerIp
-                    if (goIp != null) {
-                        Log.i(TAG, "🔌 Client → connexion TCP au GO dans 1.5s")
-                        mainHandler.postDelayed({ connectToGroupOwnerTcp() }, 1500)
+                    if (groupOwnerIp != null) {
+                        Log.i(TAG, "🔌 Client → connexion TCP au GO dans 2 secondes...")
+                        mainHandler.postDelayed({ connectToGroupOwnerTcp() }, 2000)
                     } else {
                         Log.e(TAG, "❌ IP GO inconnue")
                     }
@@ -482,17 +898,9 @@ class MeshManager(
             if (isConnectedToGroup) {
                 Log.i(TAG, "🔴 Déconnecté du groupe WiFi Direct")
                 val wasGO = isGroupOwner
-                isConnectedToGroup = false
-                isGroupOwner = false
-                groupOwnerIp = null
-                isConnecting.set(false)
-                isBecomingGO.set(false)
-                tcpConnectInProgress.set(false)
-                tcpConnections.clear()
-                socketToNodeId.clear()
+                resetConnectionState()
                 onStatusUpdate("📡 Recherche de téléphones...")
 
-                // Attendre avant de redémarrer la découverte pour laisser le système se stabiliser
                 mainHandler.postDelayed({
                     if (isRunning.get() && !isConnectedToGroup) {
                         startDiscovery()
@@ -507,7 +915,6 @@ class MeshManager(
         }
     }
 
-    // ==================== CONNEXION TCP AU GROUP OWNER ====================
     private fun connectToGroupOwnerTcp() {
         if (!isRunning.get() || isGroupOwner) return
         if (tcpConnectInProgress.getAndSet(true)) {
@@ -517,14 +924,14 @@ class MeshManager(
 
         executor.execute {
             var retries = 0
-            val maxRetries = 5
+            val maxRetries = 10
             while (isRunning.get() && isConnectedToGroup && !isGroupOwner && retries < maxRetries) {
                 try {
                     val goIp = groupOwnerIp ?: break
                     Log.i(TAG, "🔌 TCP tentative ${retries + 1}/$maxRetries → ${goIp.hostAddress}:$TCP_PORT")
 
                     val socket = Socket()
-                    socket.connect(InetSocketAddress(goIp, TCP_PORT), 8000)
+                    socket.connect(InetSocketAddress(goIp, TCP_PORT), 5000)
 
                     Log.i(TAG, "✅ TCP connecté au GO!")
                     tcpConnectInProgress.set(false)
@@ -533,11 +940,11 @@ class MeshManager(
                 } catch (e: ConnectException) {
                     retries++
                     Log.w(TAG, "⏳ GO pas prêt (tentative $retries): ${e.message}")
-                    Thread.sleep(2000)
+                    Thread.sleep(3000)
                 } catch (e: SocketTimeoutException) {
                     retries++
                     Log.w(TAG, "⏱️ Timeout (tentative $retries)")
-                    Thread.sleep(2000)
+                    Thread.sleep(3000)
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Erreur TCP: ${e.message}")
                     break
@@ -546,35 +953,33 @@ class MeshManager(
 
             tcpConnectInProgress.set(false)
             if (isRunning.get() && isConnectedToGroup && !isGroupOwner) {
-                Log.e(TAG, "❌ Échec connexion GO après $maxRetries tentatives — retry dans 10s")
-                mainHandler.postDelayed({
-                    if (isRunning.get() && isConnectedToGroup && !isGroupOwner) {
-                        connectToGroupOwnerTcp()
-                    }
-                }, 10000)
+                Log.e(TAG, "❌ Échec connexion GO après $maxRetries tentatives")
+                onStatusUpdate("⚠️ Impossible de se connecter au GO")
             }
         }
     }
 
-    // ==================== SERVEUR TCP ====================
+    // ==================== TCP SERVEUR (CANAL DE CONTRÔLE) ====================
     private fun startTcpServer() {
         executor.execute {
-            val port = try {
-                serverSocket = ServerSocket(TCP_PORT)
-                TCP_PORT
-            } catch (e: BindException) {
-                Log.w(TAG, "Port $TCP_PORT occupé → essai ${TCP_PORT + 1}")
+            var port = TCP_PORT
+            var retries = 0
+            while (retries < 10) {
                 try {
-                    serverSocket = ServerSocket(TCP_PORT + 1)
-                    TCP_PORT + 1
-                } catch (e2: Exception) {
-                    Log.e(TAG, "❌ Impossible d'ouvrir un port TCP: ${e2.message}")
-                    onError("Port TCP occupé")
-                    return@execute
+                    serverSocket = ServerSocket(port)
+                    Log.i(TAG, "🖧 Serveur TCP sur port $port")
+                    break
+                } catch (e: BindException) {
+                    port++
+                    retries++
+                    Log.w(TAG, "Port $TCP_PORT occupé, essai port $port")
                 }
             }
 
-            Log.i(TAG, "🖧 Serveur TCP prêt sur port $port")
+            if (serverSocket == null) {
+                onError("Impossible d'ouvrir un port TCP")
+                return@execute
+            }
 
             while (isRunning.get()) {
                 try {
@@ -592,7 +997,6 @@ class MeshManager(
         }
     }
 
-    // ==================== GESTION D'UNE SESSION TCP ====================
     private fun handleTcpConnection(socket: Socket, clientIp: String) {
         var nodeId: String? = null
         try {
@@ -631,9 +1035,8 @@ class MeshManager(
                         }
                         tcpConnections[nodeId!!] = socket
                         Log.i(TAG, "✅ Pair enregistré: ${packet.senderPseudo} [$nodeId] @ $clientIp")
-                        updateNodeInfo(packet.senderId, packet.senderPseudo, clientIp, true)
+                        updateNodeInfo(packet.senderId, packet.senderPseudo, clientIp, true, packet.reachabilityQuality ?: 0.5)
 
-                        // Ajouter aux appareils déjà connectés pour éviter de le recontacter
                         previouslyConnectedDevices.add(nodeId)
 
                         val directEntry = RoutingEntry(nodeId, nodeId, alpha = 10.0, beta = 1.0, timestamp = System.currentTimeMillis())
@@ -703,7 +1106,9 @@ class MeshManager(
     }
 
     // ==================== NŒUDS ====================
-    private fun updateNodeInfo(nodeId: String, pseudo: String, ip: String, isDirectNeighbor: Boolean) {
+    private fun updateNodeInfo(nodeId: String, pseudo: String, ip: String, isDirectNeighbor: Boolean, reliability: Double = 0.5) {
+        val distance = reliabilityToDistance(reliability)
+
         val existing = knownNodes[nodeId]
         if (existing != null) {
             existing.lastSeen = System.currentTimeMillis()
@@ -711,6 +1116,8 @@ class MeshManager(
             existing.ip = ip
             existing.isConnected = true
             if (isDirectNeighbor) existing.isDirectNeighbor = true
+            existing.bayesianReliability = reliability
+            existing.estimatedDistance = distance
         } else {
             knownNodes[nodeId] = NodeInfo(
                 nodeId = nodeId,
@@ -719,7 +1126,9 @@ class MeshManager(
                 lastSeen = System.currentTimeMillis(),
                 isConnected = true,
                 isDirectNeighbor = isDirectNeighbor,
-                hopDistance = if (isDirectNeighbor) 1 else Int.MAX_VALUE
+                hopDistance = if (isDirectNeighbor) 1 else Int.MAX_VALUE,
+                bayesianReliability = reliability,
+                estimatedDistance = distance
             )
             val meshNode = MeshNode(
                 deviceId = nodeId,
@@ -728,8 +1137,10 @@ class MeshManager(
                 connectionType = ConnectionType.WIFI_DIRECT,
                 lastSeen = System.currentTimeMillis(),
                 isDirectConnection = isDirectNeighbor,
+                estimatedDistance = distance,
                 ip = ip,
-                isConnected = true
+                isConnected = true,
+                bayesianReliability = reliability
             )
             mainHandler.post {
                 onNodeDiscovered(meshNode)
@@ -902,13 +1313,68 @@ class MeshManager(
         }
         entry.timestamp = System.currentTimeMillis()
         val reliability = entry.reliability
-        Log.d(TAG, "📊 Fiabilité mise à jour: dest=$destinationId next=$nextHopId succ=$success → $reliability")
+        Log.d(TAG, "📊 Fiabilité mise à jour: dest=$destinationId next=$nextHopId succ=$success → ${String.format("%.2f", reliability)}")
 
         if (destinationId != myId) {
             notifyNodeReliability(destinationId, reliability)
+
+            // Mettre à jour la distance du nœud
+            val node = knownNodes[destinationId]
+            if (node != null) {
+                node.bayesianReliability = reliability
+                node.estimatedDistance = reliabilityToDistance(reliability)
+                Log.d(TAG, "📏 Distance mise à jour pour $destinationId: ${node.estimatedDistance.toInt()}m")
+            }
         }
     }
+// ==================== GESTION DES DISTANCES ====================
 
+    /**
+     * Convertit une fiabilité bayésienne en distance estimée (en mètres)
+     * Formule: Distance = DistanceMax × (1 - Fiabilité)
+     * Fiabilité 1.0 (100%) = 1 mètre
+     * Fiabilité 0.0 (0%) = 100 mètres
+     */
+    private fun reliabilityToDistance(reliability: Double): Float {
+        val maxDistance = 100f  // Portée maximale en mètres
+        val distance = maxDistance * (1f - reliability.toFloat())
+        return distance.coerceIn(1f, maxDistance)
+    }
+
+    /**
+     * Convertit une distance en fiabilité bayésienne estimée
+     */
+    private fun distanceToReliability(distance: Float): Double {
+        val maxDistance = 100f
+        val reliability = 1.0 - (distance / maxDistance).toDouble()
+        return reliability.coerceIn(0.01, 0.99)
+    }
+
+    /**
+     * Met à jour la distance d'un nœud en fonction de sa fiabilité
+     */
+    private fun updateNodeDistance(nodeId: String) {
+        val node = knownNodes[nodeId] ?: return
+        val newDistance = reliabilityToDistance(node.bayesianReliability)
+        node.estimatedDistance = newDistance
+
+        // Notifier l'UI de la mise à jour
+        val meshNode = MeshNode(
+            deviceId = node.nodeId,
+            deviceName = node.pseudo,
+            pseudo = node.pseudo,
+            connectionType = ConnectionType.WIFI_DIRECT,
+            lastSeen = node.lastSeen,
+            isDirectConnection = node.isDirectNeighbor,
+            estimatedDistance = newDistance,
+            ip = node.ip,
+            isConnected = node.isConnected,
+            bayesianReliability = node.bayesianReliability
+        )
+        mainHandler.post {
+            onNodeDiscovered(meshNode)
+        }
+    }
     private fun selectNextHop(destinationId: String): String? {
         val entries = routingTable[destinationId]
         if (entries.isNullOrEmpty()) return null
@@ -994,6 +1460,64 @@ class MeshManager(
         context.sendBroadcast(intent)
     }
 
+
+    //recuperation du signal wifi
+    private fun getWifiDirectRssi(deviceAddress: String): Int {
+        // Vérifier les permissions
+        if (!checkWifiDirectPermission()) {
+            Log.w(TAG, "Permission WiFi manquante pour getWifiDirectRssi")
+            return -60
+        }
+
+        try {
+            // Utiliser un CountDownLatch pour attendre le résultat de la requête asynchrone
+            val latch = java.util.concurrent.CountDownLatch(1)
+            var rssiValue = -60
+
+            wifiP2pManager?.requestPeers(channel) { peers ->
+                val device = peers.deviceList.find { it.deviceAddress == deviceAddress }
+                if (device != null) {
+                    // Sur Android 8+, le RSSI n'est pas directement disponible via WifiP2pDevice
+                    // On utilise une estimation basée sur la fiabilité du lien
+                    rssiValue = estimateRssiFromReliability()
+                }
+                latch.countDown()
+            }
+
+            // Attendre au maximum 2 secondes
+            latch.await(2, java.util.concurrent.TimeUnit.SECONDS)
+            return rssiValue
+
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException dans getWifiDirectRssi: ${e.message}", e)
+            return -60
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur getWifiDirectRssi: ${e.message}", e)
+            return -60
+        }
+    }
+    private fun estimateRssiFromReliability(): Int {
+        // Récupérer les nœuds connectés avec leur fiabilité
+        val reliabilities = knownNodes.values
+            .filter { it.isConnected }
+            .map { it.bayesianReliability }  // ← Maintenant disponible
+            .toList()
+
+        if (reliabilities.isEmpty()) {
+            return -60 // Valeur par défaut
+        }
+
+        // Calcul manuel de la moyenne
+        var sum = 0.0
+        for (r in reliabilities) {
+            sum += r
+        }
+        val avgReliability = sum / reliabilities.size
+
+        // Conversion: fiabilité élevée = signal fort (RSSI proche de -30)
+        // Fiabilité faible = signal faible (RSSI proche de -90)
+        return (-30 - (60 * (1 - avgReliability))).toInt().coerceIn(-90, -30)
+    }
     // ==================== RÉCEPTION ET RELAI ====================
     private fun handleIncomingPacket(packet: MeshPacket, sourceIp: String, sourceSocket: Socket? = null) {
         if (seenPacketIds.contains(packet.id)) return
@@ -1009,11 +1533,62 @@ class MeshManager(
         Log.i(TAG, "📥 [$packetType] ${packet.senderPseudo}: ${packet.content.take(60)}")
 
         when (packetType) {
+            // ========== TRANSFERT DE FICHIERS - TRAITEMENT ACTIF ==========
+            PacketType.FILE_TRANSFER_START -> {
+                Log.i(TAG, "📥 FILE_TRANSFER_START reçu de ${packet.senderPseudo}")
+                Log.i(TAG, "   transferId: ${packet.fileTransferStart?.transferId}")
+                Log.i(TAG, "   fileName: ${packet.fileTransferStart?.fileName}")
+                Log.i(TAG, "   fileSize: ${packet.fileTransferStart?.fileSize}")
+                Log.i(TAG, "   senderPort: ${packet.fileTransferStart?.senderPort}")
+
+                // Établir la connexion avec l'expéditeur
+                executor.execute {
+                    try {
+                        val senderIp = knownNodes[packet.senderId]?.ip ?: sourceIp
+                        val senderPort = packet.fileTransferStart?.senderPort
+                        if (senderPort == null) {
+                            Log.e(TAG, "❌ senderPort est null, impossible de se connecter")
+                            return@execute
+                        }
+                        Log.i(TAG, "🔌 Connexion à l'expéditeur $senderIp:$senderPort")
+
+                        val socket = Socket()
+                        socket.connect(InetSocketAddress(senderIp, senderPort), 10000)
+                        Log.i(TAG, "✅ Connecté à l'expéditeur!")
+
+                        val writer = PrintWriter(OutputStreamWriter(socket.getOutputStream()), true)
+                        val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+
+                        // Accepter le transfert
+                        acceptFileTransfer(packet, socket, reader, writer)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Erreur connexion à l'expéditeur: ${e.message}", e)
+                    }
+                }
+                return
+            }
+
+            PacketType.FILE_CHUNK -> {
+                Log.d(TAG, "📦 FILE_CHUNK reçu (traité par acceptFileTransfer)")
+                return
+            }
+
+            PacketType.FILE_CHUNK_ACK -> {
+                Log.d(TAG, "✅ FILE_CHUNK_ACK reçu")
+                return
+            }
+
+            PacketType.FILE_TRANSFER_COMPLETE -> {
+                Log.i(TAG, "✅ FILE_TRANSFER_COMPLETE reçu")
+                return
+            }
+
+            // ========== TYPES EXISTANTS ==========
             PacketType.HEARTBEAT -> {
                 knownNodes[packet.senderId]?.lastSeen = System.currentTimeMillis()
             }
             PacketType.NODE_INFO -> {
-                updateNodeInfo(packet.senderId, packet.senderPseudo, sourceIp, true)
+                updateNodeInfo(packet.senderId, packet.senderPseudo, sourceIp, true, packet.reachabilityQuality ?: 0.5)
             }
             PacketType.CLIENT_LIST -> {
                 packet.clientList?.forEach { client ->
@@ -1165,7 +1740,11 @@ class MeshManager(
             packetType != PacketType.NODE_INFO &&
             packetType != PacketType.ROUTE_UPDATE &&
             packetType != PacketType.ACK &&
-            packetType != PacketType.ROUTE_DISCOVERY) {
+            packetType != PacketType.ROUTE_DISCOVERY &&
+            packetType != PacketType.FILE_TRANSFER_START &&
+            packetType != PacketType.FILE_CHUNK &&
+            packetType != PacketType.FILE_CHUNK_ACK &&
+            packetType != PacketType.FILE_TRANSFER_COMPLETE) {
 
             if (packet.receiver != myId || packet.receiver == "TOUS") {
                 val newPacket = packet.copy(hopCount = packet.hopCount + 1)
@@ -1184,7 +1763,6 @@ class MeshManager(
             sendPacket(packet, excludeSocket = sourceSocket)
         }
     }
-
     // ==================== UTILITAIRES ====================
     private fun getBatteryLevel(): Int {
         val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
@@ -1235,13 +1813,18 @@ class MeshManager(
 
     private fun getLocalIpAddress(): String {
         try {
-            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return "192.168.49.1"
-            for (intf in interfaces) {
-                if (!intf.isUp || intf.isLoopback) continue
-                for (addr in intf.inetAddresses) {
-                    if (addr.isLoopbackAddress || addr !is Inet4Address) continue
-                    val ip = addr.hostAddress
-                    if (ip != null && !ip.startsWith("127.")) return ip
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            if (interfaces != null) {
+                while (interfaces.hasMoreElements()) {
+                    val intf = interfaces.nextElement()
+                    if (!intf.isUp || intf.isLoopback) continue
+                    val addresses = intf.inetAddresses
+                    while (addresses.hasMoreElements()) {
+                        val addr = addresses.nextElement()
+                        if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                            return addr.hostAddress ?: "192.168.49.1"
+                        }
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -1267,9 +1850,12 @@ class MeshManager(
         executor.shutdownNow()
 
         try { serverSocket?.close() } catch (e: Exception) { }
+        try { fileTransferServer?.close() } catch (e: Exception) { }
         tcpConnections.values.forEach { try { it.close() } catch (e: Exception) { } }
         tcpConnections.clear()
         socketToNodeId.clear()
+        activeFileTransfers.values.forEach { it.close() }
+        activeFileTransfers.clear()
 
         if (receiverRegistered) {
             try { context.unregisterReceiver(wifiDirectReceiver) } catch (e: Exception) { }

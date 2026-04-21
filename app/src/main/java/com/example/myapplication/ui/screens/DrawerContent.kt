@@ -1,25 +1,52 @@
 package com.example.myapplication.ui.screens
 
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.*
-import androidx.compose.material3.*
+import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Group
+import androidx.compose.material.icons.rounded.GroupAdd
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Radar
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.SensorsOff
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.Badge
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.myapplication.*
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.BorderStroke
+import com.example.myapplication.ChatMessage
+import com.example.myapplication.ConnectionType
+import com.example.myapplication.MeshNode
+
 @Composable
 fun DrawerContent(
     myPseudo: String,
@@ -31,13 +58,16 @@ fun DrawerContent(
     onRefresh: () -> Unit,
     onShowRadar: () -> Unit,
     onClearMessages: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onBecomeGO: () -> Unit,
+    onJoinGroup: () -> Unit
 ) {
     ModalDrawerSheet(
         drawerContainerColor = Color(0xFFF8FAFF),
         modifier = Modifier.width(320.dp),
         drawerShape = RoundedCornerShape(topEnd = 24.dp, bottomEnd = 24.dp)
     ) {
+        // HEADER : PROFIL UTILISATEUR
         Surface(
             color = Color(0xFF1A73E8).copy(alpha = 0.08f),
             modifier = Modifier.fillMaxWidth()
@@ -74,16 +104,26 @@ fun DrawerContent(
                     }
                 }
 
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(16.dp))
 
+                // Actions rapides
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     QuickActionButton(Icons.Rounded.Refresh, "Sync", Color(0xFF1A73E8), onRefresh)
                     QuickActionButton(Icons.Rounded.Radar, "Radar", Color(0xFF8E24AA), onShowRadar)
                     QuickActionButton(Icons.Rounded.Settings, "Config", Color(0xFF00897B), onOpenSettings)
                 }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Boutons pour le groupe
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    QuickActionButton(Icons.Rounded.GroupAdd, "Créer GO", Color(0xFF1A73E8), onBecomeGO)
+                    QuickActionButton(Icons.Rounded.Group, "Rejoindre", Color(0xFF8E24AA), onJoinGroup)
+                }
             }
         }
 
+        // SECTION COMMUNAUTÉ
         SectionTitle("COMMUNAUTÉ")
         NavigationDrawerItem(
             icon = { Icon(Icons.Rounded.Groups, null, tint = if(selectedChatId == "TOUS") Color(0xFF1A73E8) else Color(0xFF5F6368)) },
@@ -100,6 +140,7 @@ fun DrawerContent(
 
         HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 24.dp), color = Color.LightGray.copy(0.2f))
 
+        // SECTION CONTACTS
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -121,11 +162,12 @@ fun DrawerContent(
             }
         }
 
+        // FOOTER
         Column(modifier = Modifier.background(Color(0xFFF0F2F5).copy(0.5f)).padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                 MiniStat("Nœuds", nodes.size.toString())
                 MiniStat("Flux", "${messages.size}")
-                MiniStat("DB", "?") // À adapter si besoin
+                MiniStat("DB", "?")
             }
             Spacer(Modifier.height(12.dp))
             TextButton(

@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Localisation — obligatoire pour WiFi Direct sur Android 8/9/10/11 -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -81,16 +82,6 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
-
-        <!--
-            SUPPRIMÉ : WifiDirectBroadcastReceiver statique.
-            Android 8+ interdit la réception des intents WiFi Direct
-            (PEERS_CHANGED, CONNECTION_STATE_CHANGE) par les receivers
-            statiques déclarés dans le manifest → "Background execution
-            not allowed" dans les logs.
-            Le receiver dynamique dans MeshManager suffit et fonctionne
-            sur toutes les versions.
-        -->
 
         <!-- File provider pour les fichiers audio -->
         <provider

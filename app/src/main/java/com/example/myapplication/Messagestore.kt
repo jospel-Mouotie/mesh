@@ -5,27 +5,29 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.util.Log
-import java.io.File
+import com.google.gson.Gson
 
 /**
- * MessageStore — Persistance des messages sur le stockage interne.
- * Utilise SQLite pour stocker les messages.
+ * MessageStore — Persistance des messages reçus et des messages en attente (store-and-forward).
  */
 class MessageStore(context: Context) {
 
     private val TAG = "MessageStore"
     private val db: SQLiteDatabase
+    private val gson = Gson()
 
     companion object {
         private const val DB_NAME = "mesh_messages.db"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
         private const val TABLE = "messages"
+        private const val PENDING_TABLE = "pending_messages"
         private const val MAX_MESSAGES = 1000
     }
 
     init {
         db = object : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
             override fun onCreate(db: SQLiteDatabase) {
+                // Table des messages reçus/stockés
                 db.execSQL("""
                     CREATE TABLE $TABLE (
                         id TEXT PRIMARY KEY,
@@ -41,33 +43,64 @@ class MessageStore(context: Context) {
                         audio_path TEXT,
                         file_path TEXT,
                         file_name TEXT,
-                        file_size INTEGER NOT NULL DEFAULT 0
+                        file_size INTEGER NOT NULL DEFAULT 0,
+                        reply_to_id TEXT,
+                        reply_to_content TEXT
                     )
                 """.trimIndent())
                 db.execSQL("CREATE INDEX idx_timestamp ON $TABLE(timestamp DESC)")
                 db.execSQL("CREATE INDEX idx_sender ON $TABLE(sender_id_raw)")
+
+                // Table des messages en attente (store-and-forward)
+                db.execSQL("""
+                    CREATE TABLE $PENDING_TABLE (
+                        id TEXT PRIMARY KEY,
+                        packet_json TEXT NOT NULL,
+                        destination_id TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        ttl INTEGER NOT NULL,
+                        retry_count INTEGER NOT NULL DEFAULT 0
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX idx_pending_dest ON $PENDING_TABLE(destination_id)")
+                db.execSQL("CREATE INDEX idx_pending_created ON $PENDING_TABLE(created_at)")
             }
 
             override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
                 if (oldVersion < 2) {
-                    try {
-                        db.execSQL("ALTER TABLE $TABLE ADD COLUMN file_path TEXT")
-                        db.execSQL("ALTER TABLE $TABLE ADD COLUMN file_name TEXT")
-                        db.execSQL("ALTER TABLE $TABLE ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0")
-                    } catch (e: Exception) { }
+                    db.execSQL("ALTER TABLE $TABLE ADD COLUMN file_path TEXT")
+                    db.execSQL("ALTER TABLE $TABLE ADD COLUMN file_name TEXT")
+                    db.execSQL("ALTER TABLE $TABLE ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0")
                 }
                 if (oldVersion < 3) {
+                    db.execSQL("ALTER TABLE $TABLE ADD COLUMN audio_path TEXT")
+                }
+                if (oldVersion < 4) {
+                    db.execSQL("""
+                        CREATE TABLE $PENDING_TABLE (
+                            id TEXT PRIMARY KEY,
+                            packet_json TEXT NOT NULL,
+                            destination_id TEXT NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            ttl INTEGER NOT NULL,
+                            retry_count INTEGER NOT NULL DEFAULT 0
+                        )
+                    """.trimIndent())
+                    db.execSQL("CREATE INDEX idx_pending_dest ON $PENDING_TABLE(destination_id)")
+                    db.execSQL("CREATE INDEX idx_pending_created ON $PENDING_TABLE(created_at)")
+                    // Ajout des colonnes reply dans messages si besoin
                     try {
-                        db.execSQL("ALTER TABLE $TABLE ADD COLUMN audio_path TEXT")
+                        db.execSQL("ALTER TABLE $TABLE ADD COLUMN reply_to_id TEXT")
+                        db.execSQL("ALTER TABLE $TABLE ADD COLUMN reply_to_content TEXT")
                     } catch (e: Exception) { }
                 }
             }
         }.writableDatabase
 
-        Log.i(TAG, "✅ MessageStore initialisé (${countMessages()} messages en base)")
+        Log.i(TAG, "✅ MessageStore initialisé (${countMessages()} messages, ${countPending()} en attente)")
     }
 
-    // ==================== ÉCRITURE ====================
+    // ==================== MESSAGES REÇUS/ENVOYÉS ====================
 
     fun save(msg: ChatMessage) {
         try {
@@ -86,6 +119,8 @@ class MessageStore(context: Context) {
                 put("file_path", msg.filePath)
                 put("file_name", msg.fileName)
                 put("file_size", msg.fileSize)
+                put("reply_to_id", msg.replyToId)
+                put("reply_to_content", msg.replyToContent)
             }
             db.insertWithOnConflict(TABLE, null, cv, SQLiteDatabase.CONFLICT_REPLACE)
 
@@ -124,8 +159,6 @@ class MessageStore(context: Context) {
         }
     }
 
-    // ==================== LECTURE ====================
-
     fun loadRecent(limit: Int = 200): List<ChatMessage> {
         val result = mutableListOf<ChatMessage>()
         try {
@@ -153,7 +186,6 @@ class MessageStore(context: Context) {
                 "receiver_id = ? OR sender_id_raw = ?"
             }
             val args = if (channelId == "TOUS") null else arrayOf(channelId, channelId)
-
             val cursor = db.query(TABLE, null, selection, args, null, null, "timestamp DESC", limit.toString())
             cursor.use {
                 while (it.moveToNext()) {
@@ -192,18 +224,6 @@ class MessageStore(context: Context) {
         } catch (e: Exception) { 0 }
     }
 
-    fun countUnread(channelId: String): Int {
-        return try {
-            val selection = if (channelId == "TOUS") "receiver_id = 'TOUS' AND is_mine = 0"
-            else "(receiver_id = ? OR sender_id_raw = ?) AND is_mine = 0"
-            val args = if (channelId == "TOUS") null else arrayOf(channelId, channelId)
-            val cursor = db.rawQuery("SELECT COUNT(*) FROM $TABLE WHERE $selection", args)
-            cursor.use { if (it.moveToFirst()) it.getInt(0) else 0 }
-        } catch (e: Exception) { 0 }
-    }
-
-    // ==================== INTERNE ====================
-
     private fun fromCursor(cursor: android.database.Cursor): ChatMessage? {
         return try {
             val type = try {
@@ -213,9 +233,6 @@ class MessageStore(context: Context) {
             val status = try {
                 MessageStatus.valueOf(cursor.getString(cursor.getColumnIndexOrThrow("status")))
             } catch (e: Exception) { MessageStatus.RECEIVED }
-
-            val audioPath = cursor.getString(cursor.getColumnIndexOrThrow("audio_path"))
-            val filePath = cursor.getString(cursor.getColumnIndexOrThrow("file_path"))
 
             ChatMessage(
                 id = cursor.getString(cursor.getColumnIndexOrThrow("id")),
@@ -228,10 +245,12 @@ class MessageStore(context: Context) {
                 receiverId = cursor.getString(cursor.getColumnIndexOrThrow("receiver_id")),
                 senderIdRaw = cursor.getString(cursor.getColumnIndexOrThrow("sender_id_raw")),
                 timestamp = cursor.getLong(cursor.getColumnIndexOrThrow("timestamp")),
-                audioPath = if (audioPath.isNullOrEmpty()) null else audioPath,
-                filePath = if (filePath.isNullOrEmpty()) null else filePath,
+                audioPath = cursor.getString(cursor.getColumnIndexOrThrow("audio_path")),
+                filePath = cursor.getString(cursor.getColumnIndexOrThrow("file_path")),
                 fileName = cursor.getString(cursor.getColumnIndexOrThrow("file_name")),
-                fileSize = cursor.getLong(cursor.getColumnIndexOrThrow("file_size"))
+                fileSize = cursor.getLong(cursor.getColumnIndexOrThrow("file_size")),
+                replyToId = cursor.getString(cursor.getColumnIndexOrThrow("reply_to_id")),
+                replyToContent = cursor.getString(cursor.getColumnIndexOrThrow("reply_to_content"))
             )
         } catch (e: Exception) {
             Log.w(TAG, "fromCursor: ${e.message}")
@@ -248,6 +267,96 @@ class MessageStore(context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Erreur pruneOldest: ${e.message}", e)
         }
+    }
+
+    // ==================== PENDING MESSAGES (STORE-AND-FORWARD) ====================
+
+    fun savePending(packet: MeshPacket, destinationId: String, ttlSeconds: Int = 300) {
+        try {
+            val cv = ContentValues().apply {
+                put("id", packet.id)
+                put("packet_json", gson.toJson(packet))
+                put("destination_id", destinationId)
+                put("created_at", System.currentTimeMillis())
+                put("ttl", ttlSeconds * 1000L)
+                put("retry_count", 0)
+            }
+            db.insertWithOnConflict(PENDING_TABLE, null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+            Log.i(TAG, "📦 Message en attente pour $destinationId (TTL ${ttlSeconds}s)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur savePending: ${e.message}", e)
+        }
+    }
+
+    fun loadPendingForDestination(destinationId: String): List<MeshPacket> {
+        val result = mutableListOf<MeshPacket>()
+        try {
+            val cursor = db.query(
+                PENDING_TABLE, null,
+                "destination_id = ?", arrayOf(destinationId),
+                null, null, "created_at ASC"
+            )
+            cursor.use {
+                while (it.moveToNext()) {
+                    val json = it.getString(it.getColumnIndexOrThrow("packet_json"))
+                    gson.fromJson(json, MeshPacket::class.java)?.let { result.add(it) }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur loadPendingForDestination: ${e.message}", e)
+        }
+        return result
+    }
+
+    fun loadAllPending(): List<Pair<MeshPacket, String>> {
+        val result = mutableListOf<Pair<MeshPacket, String>>()
+        try {
+            val cursor = db.query(PENDING_TABLE, null, null, null, null, null, "created_at ASC")
+            cursor.use {
+                while (it.moveToNext()) {
+                    val json = it.getString(it.getColumnIndexOrThrow("packet_json"))
+                    val dest = it.getString(it.getColumnIndexOrThrow("destination_id"))
+                    gson.fromJson(json, MeshPacket::class.java)?.let { result.add(it to dest) }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur loadAllPending: ${e.message}", e)
+        }
+        return result
+    }
+
+    fun deletePending(packetId: String) {
+        try {
+            db.delete(PENDING_TABLE, "id = ?", arrayOf(packetId))
+            Log.d(TAG, "🗑️ Message en attente supprimé: $packetId")
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur deletePending: ${e.message}", e)
+        }
+    }
+
+    fun updatePendingRetry(packetId: String) {
+        try {
+            db.execSQL("UPDATE $PENDING_TABLE SET retry_count = retry_count + 1 WHERE id = ?", arrayOf(packetId))
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur updatePendingRetry: ${e.message}", e)
+        }
+    }
+
+    fun cleanupExpiredPending() {
+        try {
+            val now = System.currentTimeMillis()
+            val deleted = db.delete(PENDING_TABLE, "created_at + ttl < ?", arrayOf(now.toString()))
+            if (deleted > 0) Log.d(TAG, "🧹 $deleted messages en attente expirés supprimés")
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur cleanupExpiredPending: ${e.message}", e)
+        }
+    }
+
+    fun countPending(): Int {
+        return try {
+            val cursor = db.rawQuery("SELECT COUNT(*) FROM $PENDING_TABLE", null)
+            cursor.use { if (it.moveToFirst()) it.getInt(0) else 0 }
+        } catch (e: Exception) { 0 }
     }
 
     fun close() {

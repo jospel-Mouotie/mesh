@@ -2,28 +2,67 @@ package com.example.myapplication
 
 import android.graphics.Paint
 import android.graphics.Typeface
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.*
-import androidx.compose.foundation.layout.*
+import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.rounded.Analytics
+import androidx.compose.material.icons.rounded.Bluetooth
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -34,15 +73,13 @@ import kotlin.math.sin
 private val CyberBackground   = Color(0xFF080E14)
 private val CyberSurface      = Color(0xFF101820)
 private val CyberOutline      = Color(0xFF1E2A37)
-private val CyberPrimary      = Color(0xFF00F2FF) // Cyan Électrique
-private val CyberSecondary    = Color(0xFF7000FF) // Deep Purple
-private val CyberSuccess      = Color(0xFF00FF85) // Green Neon
-private val CyberWarning      = Color(0xFFFFB800) // Gold
-private val CyberDanger       = Color(0xFFFF2E55) // Red Neon
-private val CyberTextMain     = Color(0xFFE1E4E8)
+private val CyberPrimary      = Color(0xFF00F2FF)
+private val CyberSecondary    = Color(0xFF7000FF)
+private val CyberSuccess      = Color(0xFF00FF85)
+private val CyberWarning      = Color(0xFFFFB800)
+private val CyberDanger       = Color(0xFFFF2E55)
 private val CyberTextMuted    = Color(0xFF8B949E)
 
-// Easing personnalisé pour l'onde sinusoïdale
 private val SineEaseInOut: Easing = Easing { fraction ->
     (-(kotlin.math.cos(Math.PI * fraction) - 1) / 2).toFloat()
 }
@@ -53,13 +90,11 @@ fun RadarScreen(
     myPseudo: String,
     onClose: () -> Unit
 ) {
-    // --- LOGIQUE DE CALCUL ---
     val nodesList by rememberUpdatedState(knownNodes.values.toList())
     val allNodes = nodesList
     val now = System.currentTimeMillis()
     val activeNodes = allNodes.filter { now - it.lastSeen < 30000 }
 
-    // --- ANIMATIONS ---
     val infiniteTransition = rememberInfiniteTransition(label = "RadarSystem")
 
     val sweepAngle by infiniteTransition.animateFloat(
@@ -98,7 +133,7 @@ fun RadarScreen(
                 .padding(horizontal = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // --- SECTION CANVAS RADAR ---
+            // --- RADAR CANVAS ---
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -106,7 +141,6 @@ fun RadarScreen(
                     .padding(12.dp),
                 contentAlignment = Alignment.Center
             ) {
-                // Effet de halo ambiant derrière le radar
                 Box(
                     modifier = Modifier
                         .fillMaxSize(0.8f)
@@ -120,7 +154,7 @@ fun RadarScreen(
                     val maxR = size.width / 2f - 10f
                     val maxDistance = 100f
 
-                    // 1. GRILLE (Cercles concentriques)
+                    // Grille
                     for (i in 1..4) {
                         val r = maxR * i / 4f
                         drawCircle(
@@ -131,7 +165,7 @@ fun RadarScreen(
                         )
                     }
 
-                    // 2. LIGNES RADIALES (Axes)
+                    // Lignes radiales
                     for (deg in 0..315 step 45) {
                         val rad = Math.toRadians(deg.toDouble())
                         drawLine(
@@ -142,9 +176,8 @@ fun RadarScreen(
                         )
                     }
 
-                    // 3. BALAYAGE ROTATIF (Sweep avec gradient)
+                    // Balayage rotatif
                     rotate(sweepAngle, Offset(cx, cy)) {
-                        // Traînée lumineuse (Gradient)
                         drawArc(
                             brush = Brush.sweepGradient(
                                 0f to Color.Transparent,
@@ -157,7 +190,6 @@ fun RadarScreen(
                             useCenter = true,
                             size = size
                         )
-                        // Ligne de balayage principale
                         drawLine(
                             color = CyberPrimary,
                             start = Offset(cx, cy),
@@ -167,7 +199,7 @@ fun RadarScreen(
                         )
                     }
 
-                    // 4. PULSATION CENTRALE
+                    // Pulsation centrale
                     drawCircle(
                         color = CyberPrimary.copy(alpha = (1f - pingScale) * 0.6f),
                         radius = maxR * pingScale,
@@ -175,20 +207,19 @@ fun RadarScreen(
                         style = Stroke(1.5.dp.toPx())
                     )
 
-                    // 5. RENDU DES NŒUDS ACTIFS
+                    // RENDU DES NŒUDS AVEC DISTANCE BASÉE SUR LA FIABILITÉ
                     activeNodes.forEachIndexed { index, node ->
-                        // Distance normalisée (inverse pour que les nœuds proches soient à l'intérieur)
-                        val rawDistance = node.estimatedDistance.coerceIn(1f, maxDistance)
-                        val normalizedDistance = (rawDistance / maxDistance).coerceIn(0.1f, 0.9f)
+                        val reliability = node.bayesianReliability.toFloat()
+                        // Distance = 100m × (1 - fiabilité)
+                        val distance = (100f * (1f - reliability)).coerceIn(10f, 90f)
+                        val normalizedDistance = (distance / maxDistance).coerceIn(0.1f, 0.9f)
                         val r = maxR * normalizedDistance
 
-                        // Angle calculé pour une répartition harmonieuse
                         val angleDeg = if (activeNodes.size > 1) 360f / activeNodes.size * index else 0f
                         val rad = Math.toRadians(angleDeg.toDouble())
                         val nx = cx + r * cos(rad).toFloat()
                         val ny = cy + r * sin(rad).toFloat()
 
-                        // Couleur basée sur la fiabilité bayésienne
                         val score = node.bayesianReliability.toFloat()
                         val nodeColor = when {
                             node.isRelay -> CyberSecondary
@@ -209,7 +240,7 @@ fun RadarScreen(
                             center = Offset(nx, ny)
                         )
 
-                        // Ligne pointillée vers le centre
+                        // Ligne pointillée
                         drawLine(
                             color = nodeColor.copy(alpha = 0.2f),
                             start = Offset(cx, cy),
@@ -218,11 +249,11 @@ fun RadarScreen(
                             pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
                         )
 
-                        // Point principal
+                        // Point du nœud
                         drawCircle(color = nodeColor, radius = 8.dp.toPx(), center = Offset(nx, ny))
                         drawCircle(color = Color.White, radius = 2.5.dp.toPx(), center = Offset(nx, ny))
 
-                        // TEXTES AVEC CANVAS NATIF
+                        // Textes
                         drawIntoCanvas { canvas ->
                             val textPaint = Paint().apply {
                                 isAntiAlias = true
@@ -230,30 +261,39 @@ fun RadarScreen(
                                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                             }
 
-                            // Pseudo (en majuscules)
                             textPaint.color = android.graphics.Color.WHITE
                             textPaint.textSize = 24f
                             canvas.nativeCanvas.drawText(node.pseudo.uppercase(), nx, ny - 35f, textPaint)
 
-                            // Distance et fiabilité
                             textPaint.textSize = 18f
-                            textPaint.color = android.graphics.Color.argb(200, 255, 255, 255)
-                            canvas.nativeCanvas.drawText("${rawDistance.toInt()}m | ${(score * 100).toInt()}%", nx, ny + 45f, textPaint)
+                            textPaint.color = nodeColor.toArgb()
+                            canvas.nativeCanvas.drawText("${distance.toInt()}m | ${(score * 100).toInt()}%", nx, ny + 45f, textPaint)
                         }
                     }
 
-                    // 6. NŒUD CENTRAL (Utilisateur)
+                    // Nœud central (utilisateur)
                     drawCircle(CyberPrimary, 12.dp.toPx(), Offset(cx, cy))
                     drawCircle(Color.White, 4.dp.toPx(), Offset(cx, cy))
+
+                    drawIntoCanvas { canvas ->
+                        val textPaint = Paint().apply {
+                            isAntiAlias = true
+                            textAlign = Paint.Align.CENTER
+                            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                            color = CyberPrimary.toArgb()
+                            textSize = 28f
+                        }
+                        canvas.nativeCanvas.drawText(myPseudo.uppercase(), cx, cy - 25f, textPaint)
+                    }
                 }
             }
 
-            // --- LÉGENDE & STATS ---
+            // Légende
             RadarLegend()
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // --- LISTE DÉTAILLÉE DES NŒUDS ---
+            // Liste des nœuds
             NodeListContainer(allNodes)
         }
     }
@@ -385,11 +425,18 @@ fun NodeListContainer(allNodes: List<MeshNode>) {
 fun EnhancedNodeRow(node: MeshNode) {
     val isActive = System.currentTimeMillis() - node.lastSeen < 30000
     val score = node.bayesianReliability.toFloat()
+    val distance = (100f * (1f - score)).coerceIn(1f, 100f)
+
+    val animatedScore by animateFloatAsState(
+        targetValue = score,
+        animationSpec = tween(500),
+        label = "score_animation"
+    )
 
     val scoreColor = when {
         node.isRelay -> CyberSecondary
-        score > 0.7f -> CyberSuccess
-        score > 0.4f -> CyberWarning
+        animatedScore > 0.7f -> CyberSuccess
+        animatedScore > 0.4f -> CyberWarning
         else -> CyberDanger
     }
 
@@ -404,17 +451,17 @@ fun EnhancedNodeRow(node: MeshNode) {
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Cercle de progression (fiabilité)
+            // Cercle de progression
             Box(contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(
-                    progress = { score },
+                    progress = { animatedScore },
                     modifier = Modifier.size(42.dp),
                     color = scoreColor,
                     strokeWidth = 3.dp,
                     trackColor = CyberOutline
                 )
                 Text(
-                    "${(score * 100).toInt()}%",
+                    "${(animatedScore * 100).toInt()}%",
                     fontSize = 10.sp,
                     color = Color.White,
                     fontWeight = FontWeight.Bold
@@ -423,7 +470,7 @@ fun EnhancedNodeRow(node: MeshNode) {
 
             Spacer(modifier = Modifier.width(16.dp))
 
-            // Informations texte
+            // Informations
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     node.pseudo,
@@ -442,23 +489,41 @@ fun EnhancedNodeRow(node: MeshNode) {
                         color = CyberTextMuted,
                         fontSize = 10.sp
                     )
+                    if (node.isRelay) {
+                        Spacer(Modifier.width(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = CyberSecondary.copy(alpha = 0.2f)
+                        ) {
+                            Text("RELAIS", fontSize = 8.sp, color = CyberSecondary, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                        }
+                    }
                 }
             }
 
-            // Métriques distance / statut
+            // Distance et statut
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    "${node.estimatedDistance.toInt()} m",
+                    "${distance.toInt()} m",
                     color = CyberPrimary,
                     fontWeight = FontWeight.Black,
                     fontSize = 14.sp
                 )
-                Text(
-                    if (isActive) "ACTIF" else "PERDU",
-                    color = if (isActive) CyberSuccess else CyberDanger,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .background(if (isActive) CyberSuccess else CyberDanger, CircleShape)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        if (isActive) "ACTIF" else "PERDU",
+                        color = if (isActive) CyberSuccess else CyberDanger,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                }
             }
         }
     }
