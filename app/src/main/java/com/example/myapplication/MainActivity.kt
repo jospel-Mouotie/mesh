@@ -123,7 +123,13 @@ class MainActivity : ComponentActivity() {
 
     private val CHANNEL_ID = "mesh_messages"
     private val TAG = "MainActivity"
-
+    private fun forceCleanupAndJoin() {
+        val intent = Intent(this, MeshService::class.java).apply {
+            action = "ACTION_CLEANUP_AND_JOIN"
+        }
+        startServiceCompat(intent)
+        Toast.makeText(this, "Nettoyage des groupes persistants...", Toast.LENGTH_SHORT).show()
+    }
     // ==================== LAUNCHERS ====================
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -294,7 +300,8 @@ class MainActivity : ComponentActivity() {
                                     onOpenSettings = { showSettings = true },
                                     onOpenFile = { openFile(it) },
                                     onBecomeGO = { becomeGroupOwner() },
-                                    onJoinGroup = { joinExistingGroup() }
+                                    onJoinGroup = { joinExistingGroup() },
+                                    onForceCleanup = { forceCleanupAndJoin() }  // ← AJOUTER CETTE LIGNE
                                 )
                             }
 

@@ -102,6 +102,7 @@ import com.example.myapplication.MessageStatus
 import com.example.myapplication.PacketType
 import kotlinx.coroutines.launch
 
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainMeshScreen(
@@ -143,37 +144,31 @@ fun MainMeshScreen(
     onOpenSettings: () -> Unit,
     onOpenFile: (ChatMessage) -> Unit,
     onBecomeGO: () -> Unit,
-    onJoinGroup: () -> Unit
+    onJoinGroup: () -> Unit,
+    onForceCleanup: () -> Unit  // ← AJOUTER CE PARAMÈTRE
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    // Calculer le nom du chat pour l'affichage dans la top bar
     val selectedChatName = if (selectedChatId == "TOUS") {
         "MIT MESH"
     } else {
         nodes[selectedChatId]?.pseudo ?: "Discussion"
     }
 
-    val filteredMessages = remember(selectedChatId, messages, searchQuery) {
+    val filteredMessages = remember(selectedChatId, messages, searchQuery, myId, myPseudo) {
         val baseList = if (selectedChatId == "TOUS") {
-            // Canal général : messages dont le destinataire est "TOUS"
             messages.filter { it.receiverId == "TOUS" }
         } else {
-            // Conversation privée : tous les messages échangés entre myId et selectedChatId
-            // Peu importe qui est l'expéditeur ou le destinataire
             messages.filter { msg ->
-                (msg.senderIdRaw == myId && msg.receiverId == selectedChatId) ||
-                        (msg.senderIdRaw == selectedChatId && msg.receiverId == myId) ||
-                        // Cas où le message est un broadcast mais vient du contact
-                        (msg.senderIdRaw == selectedChatId && msg.receiverId == "TOUS") ||
-                        // Cas où le message est privé mais l'ID est stocké différemment
-                        (msg.senderIdRaw == selectedChatId && msg.receiverId == myId) ||
-                        (msg.sender == selectedChatId || msg.sender == myPseudo)
+                val isFromSelected = msg.senderIdRaw == selectedChatId || msg.sender == selectedChatId
+                val isToSelected = msg.receiverId == selectedChatId
+                val isFromMe = msg.senderIdRaw == myId || msg.sender == myPseudo
+                val isToMe = msg.receiverId == myId
+                (isFromSelected && isToMe) || (isFromMe && isToSelected)
             }
         }
-
         if (searchQuery.isBlank()) baseList
         else baseList.filter {
             it.content.contains(searchQuery, ignoreCase = true) ||
@@ -200,7 +195,8 @@ fun MainMeshScreen(
                 onClearMessages = onClearMessages,
                 onOpenSettings = onOpenSettings,
                 onBecomeGO = onBecomeGO,
-                onJoinGroup = onJoinGroup
+                onJoinGroup = onJoinGroup,
+                onForceCleanup = onForceCleanup  // ← PASSER LE PARAMÈTRE
             )
         }
     ) {
@@ -248,7 +244,6 @@ fun MainMeshScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Fond personnalisé
                 when (backgroundType) {
                     "image" -> {
                         backgroundImageUri?.let { uri ->
@@ -270,7 +265,6 @@ fun MainMeshScreen(
                     else -> Box(Modifier.fillMaxSize().background(backgroundColor))
                 }
 
-                // Contenu principal
                 Column(
                     modifier = Modifier.fillMaxSize()
                 ) {
@@ -431,7 +425,9 @@ fun ChatView(
         }
     } else {
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp),
             reverseLayout = true,
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
@@ -546,7 +542,9 @@ fun MessageBubble(
 
                     // Heure et statut
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
                         horizontalArrangement = Arrangement.End,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -666,14 +664,18 @@ fun ChatInputBar(
 
     Surface(
         color = Color.Transparent,
-        modifier = Modifier.navigationBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp)
+        modifier = Modifier
+            .navigationBarsPadding()
+            .padding(horizontal = 8.dp, vertical = 6.dp)
     ) {
         Column {
             if (replyingTo != null) {
                 Surface(
                     color = Color(0xFFF0F2F5).copy(alpha = 0.95f),
                     shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Row(
                         modifier = Modifier.padding(8.dp),
@@ -710,16 +712,22 @@ fun ChatInputBar(
                 Surface(
                     color = Color.White.copy(alpha = 0.95f),
                     shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 6.dp),
                     shadowElevation = 2.dp
                 ) {
                     Row(modifier = Modifier.padding(8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             IconButton(
                                 onClick = { if (isRecording) onStopRecord() else onStartRecord() },
-                                modifier = Modifier.size(48.dp).background(
-                                    if (isRecording) Color(0xFFD32F2F).copy(0.15f) else Color(0xFF7C4DFF).copy(0.15f), CircleShape
-                                )
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(
+                                        if (isRecording) Color(0xFFD32F2F).copy(0.15f) else Color(
+                                            0xFF7C4DFF
+                                        ).copy(0.15f), CircleShape
+                                    )
                             ) {
                                 Icon(
                                     if (isRecording) Icons.Rounded.Stop else Icons.Rounded.Mic,
@@ -733,7 +741,9 @@ fun ChatInputBar(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             IconButton(
                                 onClick = onPickFile,
-                                modifier = Modifier.size(48.dp).background(Color(0xFF00897B).copy(0.15f), CircleShape)
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(Color(0xFF00897B).copy(0.15f), CircleShape)
                             ) {
                                 Icon(Icons.Rounded.AttachFile, null, tint = Color(0xFF00897B), modifier = Modifier.size(24.dp))
                             }
@@ -742,7 +752,9 @@ fun ChatInputBar(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             IconButton(
                                 onClick = onPickImage,
-                                modifier = Modifier.size(48.dp).background(Color(0xFF0D904F).copy(0.15f), CircleShape)
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(Color(0xFF0D904F).copy(0.15f), CircleShape)
                             ) {
                                 Icon(Icons.Rounded.Image, null, tint = Color(0xFF0D904F), modifier = Modifier.size(24.dp))
                             }
@@ -761,7 +773,9 @@ fun ChatInputBar(
                     shadowElevation = 4.dp
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(onClick = { showExtra = !showExtra }, modifier = Modifier.size(40.dp)) {
@@ -790,9 +804,12 @@ fun ChatInputBar(
                         )
                         AnimatedVisibility(text.isNotBlank()) {
                             Surface(
-                                modifier = Modifier.size(40.dp).clip(CircleShape).clickable {
-                                    onSend(text.trim()); text = ""
-                                },
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        onSend(text.trim()); text = ""
+                                    },
                                 color = Color(0xFF1A73E8)
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
@@ -817,16 +834,22 @@ fun RecordingIndicator(onStop: () -> Unit) {
         border = BorderStroke(1.dp, Color(0xFFD32F2F).copy(pulse))
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(10.dp).background(Color(0xFFD32F2F).copy(alpha = pulse), CircleShape))
+                Box(Modifier
+                    .size(10.dp)
+                    .background(Color(0xFFD32F2F).copy(alpha = pulse), CircleShape))
                 Spacer(Modifier.width(8.dp))
                 Text("🎤 Enregistrement en cours...", color = Color(0xFFD32F2F), fontSize = 14.sp)
             }
-            IconButton(onClick = onStop, modifier = Modifier.size(36.dp).background(Color(0xFFD32F2F).copy(0.15f), CircleShape)) {
+            IconButton(onClick = onStop, modifier = Modifier
+                .size(36.dp)
+                .background(Color(0xFFD32F2F).copy(0.15f), CircleShape)) {
                 Icon(Icons.Rounded.Stop, null, tint = Color(0xFFD32F2F), modifier = Modifier.size(20.dp))
             }
         }
@@ -836,7 +859,9 @@ fun RecordingIndicator(onStop: () -> Unit) {
 @Composable
 fun EmptyChatState(chatId: String) {
     Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(32.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -866,13 +891,18 @@ fun EmptyChatState(chatId: String) {
 @Composable
 fun NetworkMapBar(nodes: Map<String, MeshNode>, myPseudo: String) {
     Card(
-        modifier = Modifier.fillMaxWidth().padding(8.dp).height(110.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(8.dp)
+            .height(110.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.95f)),
         shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(2.dp)
     ) {
         Row(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {

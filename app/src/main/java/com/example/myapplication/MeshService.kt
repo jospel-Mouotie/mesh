@@ -204,7 +204,6 @@ class MeshService : Service() {
             handler.postDelayed({ if (!isServiceReady.get()) setupMeshManager() }, 5000)
         }
     }
-
     private fun handleIntentAction(intent: Intent) {
         when (intent.action) {
             "ACTION_SEND_MESSAGE" -> {
@@ -220,29 +219,30 @@ class MeshService : Service() {
                 if (isServiceReady.get()) {
                     Log.i(TAG, "🔧 Action BECOME_GO reçue")
                     meshManager?.forceBecomeGroupOwner()
-                } else {
-                    Log.w(TAG, "MeshManager non prêt pour devenir GO")
                 }
             }
             "ACTION_JOIN_GROUP" -> {
                 if (isServiceReady.get()) {
                     Log.i(TAG, "🔧 Action JOIN_GROUP reçue")
                     meshManager?.forceJoinExistingGroup()
-                } else {
-                    Log.w(TAG, "MeshManager non prêt pour rejoindre un groupe")
                 }
             }
             "ACTION_RECONNECT_TCP" -> {
                 if (isServiceReady.get()) {
                     Log.i(TAG, "🔧 Action RECONNECT_TCP reçue")
                     meshManager?.forceReconnectTcp()
+                }
+            }
+            "ACTION_CLEANUP_AND_JOIN" -> {  // ← AJOUTER CE BLOC
+                if (isServiceReady.get()) {
+                    Log.i(TAG, "🧹 Action CLEANUP_AND_JOIN reçue")
+                    meshManager?.forceResetAndJoin()
                 } else {
-                    Log.w(TAG, "MeshManager non prêt pour reconnecter TCP")
+                    Log.w(TAG, "MeshManager non prêt pour le nettoyage")
                 }
             }
         }
     }
-
     private fun sendMessage(intent: Intent) {
         val content = intent.getStringExtra("content") ?: return
         val receiver = intent.getStringExtra("receiver") ?: "TOUS"

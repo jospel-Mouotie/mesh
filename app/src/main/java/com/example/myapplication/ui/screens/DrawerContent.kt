@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CleaningServices
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.GroupAdd
@@ -46,7 +47,6 @@ import androidx.compose.ui.unit.sp
 import com.example.myapplication.ChatMessage
 import com.example.myapplication.ConnectionType
 import com.example.myapplication.MeshNode
-
 @Composable
 fun DrawerContent(
     myPseudo: String,
@@ -60,14 +60,14 @@ fun DrawerContent(
     onClearMessages: () -> Unit,
     onOpenSettings: () -> Unit,
     onBecomeGO: () -> Unit,
-    onJoinGroup: () -> Unit
+    onJoinGroup: () -> Unit,
+    onForceCleanup: () -> Unit  // ← AJOUTER CE PARAMÈTRE
 ) {
     ModalDrawerSheet(
         drawerContainerColor = Color(0xFFF8FAFF),
         modifier = Modifier.width(320.dp),
         drawerShape = RoundedCornerShape(topEnd = 24.dp, bottomEnd = 24.dp)
     ) {
-        // HEADER : PROFIL UTILISATEUR
         Surface(
             color = Color(0xFF1A73E8).copy(alpha = 0.08f),
             modifier = Modifier.fillMaxWidth()
@@ -106,7 +106,7 @@ fun DrawerContent(
 
                 Spacer(Modifier.height(16.dp))
 
-                // Actions rapides
+                // Première rangée d'actions
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     QuickActionButton(Icons.Rounded.Refresh, "Sync", Color(0xFF1A73E8), onRefresh)
                     QuickActionButton(Icons.Rounded.Radar, "Radar", Color(0xFF8E24AA), onShowRadar)
@@ -115,15 +115,15 @@ fun DrawerContent(
 
                 Spacer(Modifier.height(12.dp))
 
-                // Boutons pour le groupe
+                // Deuxième rangée d'actions (groupe)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     QuickActionButton(Icons.Rounded.GroupAdd, "Créer GO", Color(0xFF1A73E8), onBecomeGO)
                     QuickActionButton(Icons.Rounded.Group, "Rejoindre", Color(0xFF8E24AA), onJoinGroup)
+                    QuickActionButton(Icons.Rounded.CleaningServices, "Nettoyer", Color(0xFFE65100), onForceCleanup)
                 }
             }
         }
 
-        // SECTION COMMUNAUTÉ
         SectionTitle("COMMUNAUTÉ")
         NavigationDrawerItem(
             icon = { Icon(Icons.Rounded.Groups, null, tint = if(selectedChatId == "TOUS") Color(0xFF1A73E8) else Color(0xFF5F6368)) },
@@ -140,7 +140,6 @@ fun DrawerContent(
 
         HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 24.dp), color = Color.LightGray.copy(0.2f))
 
-        // SECTION CONTACTS
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -162,7 +161,6 @@ fun DrawerContent(
             }
         }
 
-        // FOOTER
         Column(modifier = Modifier.background(Color(0xFFF0F2F5).copy(0.5f)).padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                 MiniStat("Nœuds", nodes.size.toString())
@@ -182,7 +180,6 @@ fun DrawerContent(
         }
     }
 }
-
 @Composable
 fun QuickActionButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, color: Color, onClick: () -> Unit) {
     Column(

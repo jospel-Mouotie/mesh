@@ -49,6 +49,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 
 class MeshManager(
@@ -77,6 +78,8 @@ class MeshManager(
     private val HEARTBEAT_INTERVAL = 10000L
     private val NODE_TIMEOUT = 35000L
     private val ROUTE_UPDATE_INTERVAL = 15000L
+    private val SCAN_DURATION_BEFORE_GO = 5000L // 5 secondes de scan minimum
+    private val GO_FORMATION_DELAY = 8000L      // Délai total avant formation GO
 
     private val knownNodes = ConcurrentHashMap<String, NodeInfo>()
     private val seenPacketIds = Collections.synchronizedSet(mutableSetOf<String>())
@@ -100,6 +103,12 @@ class MeshManager(
     private val isBecomingGO = AtomicBoolean(false)
     private var discoverRetryCount = 0
 
+    // CORRECTION: Gestion d'état du scan
+    private val scanStartTime = AtomicLong(0)
+    private val hasScannedEnough = AtomicBoolean(false)
+    private val goFormationScheduled = AtomicBoolean(false)
+    private val peersDiscoveredDuringScan = Collections.synchronizedSet(mutableSetOf<String>())
+
     // Ensemble des appareils déjà connectés pour éviter les reconnexions
     private val previouslyConnectedDevices = mutableSetOf<String>()
 
@@ -120,7 +129,10 @@ class MeshManager(
         var isDirectNeighbor: Boolean = false,
         var hopDistance: Int = Int.MAX_VALUE,
         var bayesianReliability: Double = 0.5,
-        var estimatedDistance: Float = 50f  // Distance par défaut: 50 mètres
+        // CORRECTION: Distance basée sur la latence réelle et le hop count
+        var estimatedDistance: Float = -1f,  // -1 = inconnu
+        var latencyMs: Double = 0.0,         // Latence mesurée en ms
+        var lastLatencyCheck: Long = 0       // Dernier check de latence
     )
 
     private inner class FileTransferSession(
@@ -138,10 +150,22 @@ class MeshManager(
         var isSender: Boolean = true
     ) {
         fun close() {
-            try { socket?.close() } catch (e: Exception) {}
-            try { outputStream?.close() } catch (e: Exception) {}
-            try { inputStream?.close() } catch (e: Exception) {}
-            try { fileRaf?.close() } catch (e: Exception) {}
+            try {
+                socket?.close()
+            } catch (e: Exception) {
+            }
+            try {
+                outputStream?.close()
+            } catch (e: Exception) {
+            }
+            try {
+                inputStream?.close()
+            } catch (e: Exception) {
+            }
+            try {
+                fileRaf?.close()
+            } catch (e: Exception) {
+            }
         }
     }
 
@@ -165,11 +189,13 @@ class MeshManager(
                 lastSeen = System.currentTimeMillis(),
                 isConnected = true,
                 isDirectNeighbor = false,
-                hopDistance = 0
+                hopDistance = 0,
+                estimatedDistance = 0f,
+                latencyMs = 0.0
             )
 
             startTcpServer()
-            startFileTransferServer()  // ← DOIT ÊTRE PRÉSENTE
+            startFileTransferServer()
             startWifiDirect()
             startHeartbeat()
             startRouteUpdatePropagation()
@@ -233,7 +259,6 @@ class MeshManager(
         Log.i(TAG, "   fileName: $fileName")
         Log.i(TAG, "   fileSize: $fileSize")
 
-        // Vérifier si la destination est connectée
         if (!tcpConnections.containsKey(destinationId)) {
             Log.e(TAG, "❌ Destination $destinationId non connectée!")
             Log.e(TAG, "   Connexions actives: ${tcpConnections.keys}")
@@ -311,7 +336,10 @@ class MeshManager(
                     sentBytes += len
                     onProgress(sentBytes, fileSize)
                     if (chunkIdx % 10 == 0) {
-                        Log.i(TAG, "📤 Chunk $chunkIdx/${totalChunks} envoyé (${sentBytes}/$fileSize)")
+                        Log.i(
+                            TAG,
+                            "📤 Chunk $chunkIdx/${totalChunks} envoyé (${sentBytes}/$fileSize)"
+                        )
                     }
                 }
 
@@ -331,7 +359,10 @@ class MeshManager(
                 onComplete()
 
             } catch (e: SocketTimeoutException) {
-                Log.e(TAG, "❌ Timeout: le destinataire n'a pas accepté la connexion sur le port ${serverSocketForTransfer?.localPort}")
+                Log.e(
+                    TAG,
+                    "❌ Timeout: le destinataire n'a pas accepté la connexion sur le port ${serverSocketForTransfer?.localPort}"
+                )
                 onError("Timeout: le destinataire n'a pas accepté la connexion")
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Erreur transfert fichier: ${e.message}", e)
@@ -342,7 +373,13 @@ class MeshManager(
             }
         }
     }
-    private fun acceptFileTransfer(startPacket: MeshPacket, dataSocket: Socket, reader: BufferedReader, writer: PrintWriter) {
+
+    private fun acceptFileTransfer(
+        startPacket: MeshPacket,
+        dataSocket: Socket,
+        reader: BufferedReader,
+        writer: PrintWriter
+    ) {
         val startInfo = startPacket.fileTransferStart ?: return
         val transferId = startInfo.transferId
         val senderId = startPacket.senderId
@@ -393,6 +430,7 @@ class MeshManager(
                             writer.println(gson.toJson(ackPacket))
                             writer.flush()
                         }
+
                         PacketType.FILE_TRANSFER_COMPLETE -> {
                             val finalFile = File(context.cacheDir, fileName)
                             tempFile.renameTo(finalFile)
@@ -402,7 +440,10 @@ class MeshManager(
                                 sender = startPacket.senderPseudo,
                                 content = fileName,
                                 isMine = false,
-                                time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()),
+                                time = SimpleDateFormat(
+                                    "HH:mm",
+                                    Locale.getDefault()
+                                ).format(Date()),
                                 status = MessageStatus.RECEIVED,
                                 type = PacketType.FILE,
                                 receiverId = myId,
@@ -414,6 +455,7 @@ class MeshManager(
                             mainHandler.post { onMessageReceived(chatMsg) }
                             break
                         }
+
                         else -> {
                             Log.d(TAG, "Ignoring packet type ${packet.type} in file transfer")
                         }
@@ -425,10 +467,14 @@ class MeshManager(
                 Log.e(TAG, "❌ Erreur réception fichier", e)
             } finally {
                 activeFileTransfers.remove(transferId)?.close()
-                try { raf?.close() } catch (e: Exception) {}
+                try {
+                    raf?.close()
+                } catch (e: Exception) {
+                }
             }
         }
     }
+
     // ==================== ACTIONS UTILISATEUR ====================
     fun forceBecomeGroupOwner() {
         Log.i(TAG, "🔧 Force devenir Group Owner")
@@ -436,6 +482,9 @@ class MeshManager(
             onStatusUpdate("👑 Déjà GO")
             return
         }
+        // Annuler tout scan en cours et forcer GO immédiatement
+        hasScannedEnough.set(true)
+        goFormationScheduled.set(false)
         becomeGroupOwner()
     }
 
@@ -447,28 +496,39 @@ class MeshManager(
                 override fun onSuccess() {
                     Log.i(TAG, "✅ Groupe quitté, recherche d'un groupe à rejoindre...")
                     resetConnectionState()
+                    // Reset scan state
+                    hasScannedEnough.set(false)
+                    goFormationScheduled.set(false)
+                    peersDiscoveredDuringScan.clear()
                     startDiscovery()
+                    // CORRECTION: Attendre 5s de scan avant de décider
                     mainHandler.postDelayed({
                         if (!isConnectedToGroup && !isGroupOwner && !hasDiscoveredPeers()) {
-                            Log.i(TAG, "🔍 Aucun groupe trouvé, je deviens GO")
+                            Log.i(TAG, "🔍 Aucun groupe trouvé après scan forcé, je deviens GO")
                             becomeGroupOwner()
                         }
-                    }, 10000)
+                    }, SCAN_DURATION_BEFORE_GO)
                 }
+
                 override fun onFailure(reason: Int) {
                     Log.e(TAG, "❌ Échec départ du groupe: $reason")
                     resetConnectionState()
+                    hasScannedEnough.set(false)
+                    goFormationScheduled.set(false)
                     startDiscovery()
                 }
             })
         } else {
+            hasScannedEnough.set(false)
+            goFormationScheduled.set(false)
+            peersDiscoveredDuringScan.clear()
             startDiscovery()
             mainHandler.postDelayed({
                 if (!isConnectedToGroup && !isGroupOwner && !hasDiscoveredPeers()) {
                     Log.i(TAG, "🔍 Aucun groupe trouvé, je deviens GO")
                     becomeGroupOwner()
                 }
-            }, 10000)
+            }, SCAN_DURATION_BEFORE_GO)
         }
     }
 
@@ -493,7 +553,8 @@ class MeshManager(
     }
 
     private fun hasDiscoveredPeers(): Boolean {
-        return knownNodes.values.any { it.nodeId != myId && System.currentTimeMillis() - it.lastSeen < 10000 }
+        return peersDiscoveredDuringScan.isNotEmpty() ||
+                knownNodes.values.any { it.nodeId != myId && System.currentTimeMillis() - it.lastSeen < 10000 }
     }
 
     // ==================== WIFI DIRECT ====================
@@ -529,6 +590,7 @@ class MeshManager(
                     isGroupOwner = group.isGroupOwner
                     if (isGroupOwner) {
                         onStatusUpdate("👑 GO actif (groupe restauré)")
+                        hasScannedEnough.set(true)
                     } else {
                         onStatusUpdate("🔗 Connecté au GO (groupe restauré)")
                         groupOwnerIp = group.owner?.deviceAddress?.let { getIpFromMac(it) }
@@ -537,15 +599,16 @@ class MeshManager(
                         }
                     }
                 } else {
-                    Log.d(TAG, "📭 Aucun groupe persistant, démarrage normal")
+                    Log.d(TAG, "📭 Aucun groupe persistant, démarrage avec scan obligatoire")
+                    // CORRECTION: Démarrer le scan ET marquer le début du scan
+                    scanStartTime.set(System.currentTimeMillis())
+                    hasScannedEnough.set(false)
+                    goFormationScheduled.set(false)
+                    peersDiscoveredDuringScan.clear()
                     startDiscovery()
 
-                    mainHandler.postDelayed({
-                        if (isRunning.get() && !isConnectedToGroup && !isConnecting.get() && !isBecomingGO.get()) {
-                            Log.i(TAG, "⏱️ Aucun pair trouvé après 10s → je deviens Group Owner")
-                            becomeGroupOwner()
-                        }
-                    }, 10000)
+                    // CORRECTION: Programmer la décision GO seulement après 5s de scan
+                    scheduleGoFormationAfterScan()
                 }
             }
 
@@ -553,6 +616,90 @@ class MeshManager(
             Log.e(TAG, "❌ Erreur init WiFi Direct: ${e.message}", e)
             onError("Erreur WiFi Direct: ${e.message}")
         }
+    }
+
+    // CORRECTION NOUVELLE: Planifier la formation GO uniquement après scan complet
+    private var connectionAttemptCount = 0
+    private val MAX_CONNECTION_ATTEMPTS = 8  // Nombre maximum de tentatives avant de devenir GO
+
+    // CORRECTION NOUVELLE: Planifier la formation GO uniquement après scan complet
+    private fun scheduleGoFormationAfterScan() {
+        if (goFormationScheduled.getAndSet(true)) return
+
+        Log.i(
+            TAG,
+            "⏱️ Scan réseau démarré, attente de ${SCAN_DURATION_BEFORE_GO}ms avant décision GO..."
+        )
+        onStatusUpdate("🔍 Scan du réseau en cours...")
+
+        mainHandler.postDelayed({
+            if (!isRunning.get()) return@postDelayed
+            hasScannedEnough.set(true)
+
+            if (isConnectedToGroup || isGroupOwner) {
+                Log.i(TAG, "✅ Déjà connecté, pas besoin de devenir GO")
+                connectionAttemptCount = 0
+                return@postDelayed
+            }
+
+            if (hasDiscoveredPeers()) {
+                Log.i(TAG, "📱 Pairs découverts pendant le scan, tentative de connexion...")
+                // Commencer les tentatives de connexion
+                startConnectionAttempts()
+            } else {
+                Log.i(TAG, "⏱️ Aucun pair trouvé après scan, je deviens Group Owner")
+                becomeGroupOwner()
+            }
+        }, SCAN_DURATION_BEFORE_GO)
+    }
+
+    // Nouvelle méthode pour gérer les tentatives de connexion
+    private fun startConnectionAttempts() {
+        if (!isRunning.get()) return
+        if (isConnectedToGroup || isGroupOwner) return
+
+        connectionAttemptCount = 0
+        attemptConnection()
+    }
+
+    private fun attemptConnection() {
+        if (!isRunning.get()) return
+        if (isConnectedToGroup || isGroupOwner) {
+            Log.i(TAG, "✅ Connexion établie, arrêt des tentatives")
+            connectionAttemptCount = 0
+            return
+        }
+
+        if (connectionAttemptCount >= MAX_CONNECTION_ATTEMPTS) {
+            Log.i(
+                TAG,
+                "❌ Échec de connexion après $MAX_CONNECTION_ATTEMPTS tentatives, je deviens GO"
+            )
+            becomeGroupOwner()
+            connectionAttemptCount = 0
+            return
+        }
+
+        connectionAttemptCount++
+        val delay = connectionAttemptCount * 2000L  // 2s, 4s, 6s, etc.
+
+        Log.i(
+            TAG,
+            "🔄 Tentative de connexion $connectionAttemptCount/$MAX_CONNECTION_ATTEMPTS (délai: ${delay}ms)"
+        )
+
+        mainHandler.postDelayed({
+            if (hasDiscoveredPeers() && !isConnectedToGroup && !isGroupOwner) {
+                // Demander à requestPeers de tenter une connexion
+                requestPeers()
+                // Planifier la prochaine tentative
+                attemptConnection()
+            } else if (!hasDiscoveredPeers()) {
+                Log.i(TAG, "📭 Plus aucun pair détecté, je deviens GO")
+                becomeGroupOwner()
+                connectionAttemptCount = 0
+            }
+        }, delay)
     }
 
     private fun getIpFromMac(macAddress: String): InetAddress? {
@@ -613,6 +760,7 @@ class MeshManager(
                     Log.i(TAG, "✅ Découverte WiFi Direct démarrée")
                     discoverRetryCount = 0
                 }
+
                 override fun onFailure(reason: Int) {
                     Log.w(TAG, "⚠️ discoverPeers: $reason ${reasonToString(reason)}")
                     if (reason == 0) {
@@ -641,7 +789,9 @@ class MeshManager(
     private fun becomeGroupOwner() {
         if (!isRunning.get() || isGroupOwner || isConnectedToGroup) return
         if (!isBecomingGO.compareAndSet(false, true)) return
-        if (!checkWifiDirectPermission()) { isBecomingGO.set(false); return }
+        if (!checkWifiDirectPermission()) {
+            isBecomingGO.set(false); return
+        }
 
         Log.i(TAG, "👑 Création du groupe WiFi Direct (GO)")
 
@@ -650,6 +800,7 @@ class MeshManager(
                 Log.i(TAG, "✅ Groupe existant supprimé, création du nouveau...")
                 createNewGroup()
             }
+
             override fun onFailure(reason: Int) {
                 Log.e(TAG, "❌ Échec suppression groupe: $reason, tentative directe...")
                 createNewGroup()
@@ -681,6 +832,7 @@ class MeshManager(
                                 }
                             }, 10000)
                         }
+
                         else -> {
                             mainHandler.postDelayed({
                                 if (isRunning.get() && !isConnectedToGroup) becomeGroupOwner()
@@ -709,7 +861,10 @@ class MeshManager(
                 }
 
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                    Log.d(TAG, "📢 PEERS_CHANGED reçu (connecté=$isConnectedToGroup, connecting=${isConnecting.get()})")
+                    Log.d(
+                        TAG,
+                        "📢 PEERS_CHANGED reçu (connecté=$isConnectedToGroup, connecting=${isConnecting.get()})"
+                    )
                     requestPeers()
                 }
 
@@ -731,7 +886,10 @@ class MeshManager(
     @Suppress("DEPRECATION")
     private fun getDeviceFromIntent(intent: Intent): WifiP2pDevice? {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE, WifiP2pDevice::class.java)
+            intent.getParcelableExtra(
+                WifiP2pManager.EXTRA_WIFI_P2P_DEVICE,
+                WifiP2pDevice::class.java
+            )
         } else {
             intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE)
         }
@@ -740,7 +898,10 @@ class MeshManager(
     @Suppress("DEPRECATION")
     private fun getNetworkInfoFromIntent(intent: Intent): android.net.NetworkInfo? {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO, android.net.NetworkInfo::class.java)
+            intent.getParcelableExtra(
+                WifiP2pManager.EXTRA_NETWORK_INFO,
+                android.net.NetworkInfo::class.java
+            )
         } else {
             intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO)
         }
@@ -757,6 +918,13 @@ class MeshManager(
                 }
 
                 if (devices.isEmpty()) return@requestPeers
+
+                // CORRECTION: Enregistrer les pairs découverts
+                devices.forEach { device ->
+                    if (device.deviceAddress != thisDeviceAddress) {
+                        peersDiscoveredDuringScan.add(device.deviceAddress)
+                    }
+                }
 
                 val validPeers = devices.filter {
                     it.deviceName != null &&
@@ -775,12 +943,25 @@ class MeshManager(
                     return@requestPeers
                 }
 
-                if (!isConnectedToGroup && !isConnecting.get()) {
+                // Pendant la phase de scan, on essaie de se connecter
+                if (!hasScannedEnough.get()) {
+                    Log.d(
+                        TAG,
+                        "⏳ Phase de scan en cours (${System.currentTimeMillis() - scanStartTime.get()}ms), tentative de connexion..."
+                    )
+                }
+
+                if (!isConnectedToGroup && !isConnecting.get() && !isGroupOwner) {
+                    // Choisir le pair avec la meilleure adresse MAC (pour éviter les connexions multiples)
                     val sorted = validPeers.sortedBy { it.deviceAddress }
-                    Log.i(TAG, "📱 Je me connecte au nouveau pair ${sorted.first().deviceName}")
-                    connectToPeerWithRetry(sorted.first(), 0)
+                    val bestPeer = sorted.first()
+                    Log.i(TAG, "📱 Tentative de connexion au pair ${bestPeer.deviceName}")
+                    connectToPeerWithRetry(bestPeer, 0)
                 } else {
-                    Log.d(TAG, "Connexion ignorée (connecté=$isConnectedToGroup, connecting=${isConnecting.get()})")
+                    Log.d(
+                        TAG,
+                        "Connexion ignorée (connecté=$isConnectedToGroup, connecting=${isConnecting.get()})"
+                    )
                 }
             }
         } catch (e: SecurityException) {
@@ -789,18 +970,22 @@ class MeshManager(
     }
 
     private fun connectToPeerWithRetry(device: WifiP2pDevice, attempt: Int) {
-        if (attempt >= 3) {
-            Log.e(TAG, "❌ Échec de connexion après 3 tentatives, abandon")
+        // Augmenter le nombre de tentatives à 8
+        if (attempt >= 8) {
+            Log.e(TAG, "❌ Échec de connexion après 8 tentatives, abandon")
             onError("Impossible de se connecter à ${device.deviceName}")
             isConnecting.set(false)
-            startDiscovery()
+            // Ne pas devenir GO immédiatement, attendre que startConnectionAttempts décide
             return
         }
         if (attempt > 0) {
-            val delay = 2000L * attempt
-            Log.i(TAG, "⏳ Nouvelle tentative de connexion dans ${delay}ms (tentative ${attempt + 1}/3)")
+            val delay = 3000L * attempt  // 3s, 6s, 9s...
+            Log.i(
+                TAG,
+                "⏳ Nouvelle tentative de connexion dans ${delay}ms (tentative ${attempt + 1}/8)"
+            )
             mainHandler.postDelayed({
-                if (isRunning.get() && !isConnectedToGroup) {
+                if (isRunning.get() && !isConnectedToGroup && !isGroupOwner) {
                     connectToPeer(device, attempt + 1)
                 }
             }, delay)
@@ -814,7 +999,9 @@ class MeshManager(
             Log.d(TAG, "Connexion déjà en cours, ignoré")
             return
         }
-        if (!checkWifiDirectPermission()) { isConnecting.set(false); return }
+        if (!checkWifiDirectPermission()) {
+            isConnecting.set(false); return
+        }
 
         if (isGroupOwner || isConnectedToGroup) {
             Log.w(TAG, "Déjà dans un groupe, connexion ignorée")
@@ -822,45 +1009,59 @@ class MeshManager(
             return
         }
 
-        val config = WifiP2pConfig().apply {
-            deviceAddress = device.deviceAddress
-            groupOwnerIntent = 0
-        }
+        Log.i(TAG, "🔍 Vérification du groupe du pair ${device.deviceName}...")
 
-        try {
-            wifiP2pManager?.connect(channel, config, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    Log.i(TAG, "✅ Connexion WiFi Direct demandée à ${device.deviceName}")
-                    onStatusUpdate("🔗 Connexion à ${device.deviceName}...")
-                    previouslyConnectedDevices.add(device.deviceAddress)
+        // Vérifier si le pair a déjà un groupe persistant
+        wifiP2pManager?.requestGroupInfo(channel) { ourGroup ->
+            // D'abord, préparer à rejoindre le groupe du pair
+            prepareToJoinPeerGroup(device.deviceAddress) {
+                // Maintenant on peut tenter la connexion
+                val config = WifiP2pConfig().apply {
+                    this.deviceAddress = device.deviceAddress
+                    groupOwnerIntent = 0  // Force client, pas GO
                 }
-                override fun onFailure(reason: Int) {
-                    Log.e(TAG, "❌ connect échoué: $reason ${reasonToString(reason)}")
+
+                try {
+                    wifiP2pManager?.connect(
+                        channel,
+                        config,
+                        object : WifiP2pManager.ActionListener {
+                            override fun onSuccess() {
+                                Log.i(
+                                    TAG,
+                                    "✅ Connexion WiFi Direct demandée à ${device.deviceName}"
+                                )
+                                onStatusUpdate("🔗 Connexion à ${device.deviceName}...")
+                                previouslyConnectedDevices.add(device.deviceAddress)
+                            }
+
+                            override fun onFailure(reason: Int) {
+                                Log.e(TAG, "❌ connect échoué: $reason ${reasonToString(reason)}")
+                                isConnecting.set(false)
+                                if (reason == 0 || reason == 2) {
+                                    // Réessayer avec une nouvelle approche
+                                    connectToPeerWithRetry(device, attempt)
+                                }
+                            }
+                        })
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "Permission refusée connect", e)
                     isConnecting.set(false)
-                    if (reason == 0) {
-                        connectToPeerWithRetry(device, attempt)
-                    } else {
-                        mainHandler.postDelayed({
-                            if (isRunning.get() && !isConnectedToGroup) requestPeers()
-                        }, 5000)
-                    }
                 }
-            })
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Permission refusée connect", e)
-            isConnecting.set(false)
+            }
         }
 
         mainHandler.postDelayed({
             if (isConnecting.get() && !isConnectedToGroup) {
-                Log.w(TAG, "⏰ Timeout de connexion (10s)")
+                Log.w(TAG, "⏰ Timeout de connexion (15s)")
                 isConnecting.set(false)
                 try {
                     wifiP2pManager?.cancelConnect(channel, null)
-                } catch (e: Exception) { }
+                } catch (e: Exception) {
+                }
                 if (isRunning.get()) requestPeers()
             }
-        }, 10000)
+        }, 15000)
     }
 
     private fun handleConnectionChanged(intent: Intent) {
@@ -878,6 +1079,8 @@ class MeshManager(
                 isConnectedToGroup = true
                 isConnecting.set(false)
                 isBecomingGO.set(false)
+                hasScannedEnough.set(true) // On est connecté, plus besoin de scan
+                goFormationScheduled.set(false)
 
                 Log.i(TAG, "✅ Groupe WiFi Direct rejoint")
                 Log.i(TAG, "   GO IP : ${groupOwnerIp?.hostAddress}")
@@ -885,6 +1088,10 @@ class MeshManager(
 
                 if (isGroupOwner) {
                     onStatusUpdate("👑 En attente de clients...")
+                    // CORRECTION: Le GO doit immédiatement diffuser sa présence
+                    mainHandler.postDelayed({
+                        broadcastClientList()
+                    }, 1000)
                 } else {
                     if (groupOwnerIp != null) {
                         Log.i(TAG, "🔌 Client → connexion TCP au GO dans 2 secondes...")
@@ -901,14 +1108,16 @@ class MeshManager(
                 resetConnectionState()
                 onStatusUpdate("📡 Recherche de téléphones...")
 
+                // CORRECTION: Reset scan state et redémarrer le cycle
+                hasScannedEnough.set(false)
+                goFormationScheduled.set(false)
+                peersDiscoveredDuringScan.clear()
+                scanStartTime.set(System.currentTimeMillis())
+
                 mainHandler.postDelayed({
                     if (isRunning.get() && !isConnectedToGroup) {
                         startDiscovery()
-                        if (wasGO) {
-                            mainHandler.postDelayed({
-                                if (isRunning.get() && !isConnectedToGroup) becomeGroupOwner()
-                            }, 5000)
-                        }
+                        scheduleGoFormationAfterScan()
                     }
                 }, 5000)
             }
@@ -928,7 +1137,10 @@ class MeshManager(
             while (isRunning.get() && isConnectedToGroup && !isGroupOwner && retries < maxRetries) {
                 try {
                     val goIp = groupOwnerIp ?: break
-                    Log.i(TAG, "🔌 TCP tentative ${retries + 1}/$maxRetries → ${goIp.hostAddress}:$TCP_PORT")
+                    Log.i(
+                        TAG,
+                        "🔌 TCP tentative ${retries + 1}/$maxRetries → ${goIp.hostAddress}:$TCP_PORT"
+                    )
 
                     val socket = Socket()
                     socket.connect(InetSocketAddress(goIp, TCP_PORT), 5000)
@@ -1031,19 +1243,46 @@ class MeshManager(
                         nodeId = packet.senderId
                         socketToNodeId[socket] = nodeId
                         tcpConnections[nodeId!!]?.let { old ->
-                            try { old.close() } catch (e: Exception) { }
+                            try {
+                                old.close()
+                            } catch (e: Exception) {
+                            }
                         }
                         tcpConnections[nodeId!!] = socket
-                        Log.i(TAG, "✅ Pair enregistré: ${packet.senderPseudo} [$nodeId] @ $clientIp")
-                        updateNodeInfo(packet.senderId, packet.senderPseudo, clientIp, true, packet.reachabilityQuality ?: 0.5)
+                        Log.i(
+                            TAG,
+                            "✅ Pair enregistré: ${packet.senderPseudo} [$nodeId] @ $clientIp"
+                        )
+
+                        // CORRECTION: Calculer la latence pour la distance
+                        val latency = measureLatency(socket)
+                        updateNodeInfo(
+                            nodeId = packet.senderId,
+                            pseudo = packet.senderPseudo,
+                            ip = clientIp,
+                            isDirectNeighbor = true,
+                            reliability = packet.reachabilityQuality ?: 0.5,
+                            latencyMs = latency
+                        )
 
                         previouslyConnectedDevices.add(nodeId)
 
-                        val directEntry = RoutingEntry(nodeId, nodeId, alpha = 10.0, beta = 1.0, timestamp = System.currentTimeMillis())
+                        val directEntry = RoutingEntry(
+                            nodeId,
+                            nodeId,
+                            alpha = 10.0,
+                            beta = 1.0,
+                            timestamp = System.currentTimeMillis()
+                        )
                         routingTable.getOrPut(nodeId) { mutableListOf() }.add(directEntry)
 
+                        // CORRECTION: Si on est GO, diffuser la liste des clients à TOUS
                         if (isGroupOwner) {
-                            broadcastClientList()
+                            mainHandler.postDelayed({
+                                broadcastClientList()
+                                // Envoyer aussi la liste au nouveau client
+                                broadcastClientListToSocket(socket)
+                            }, 500)
                         }
                     } else if (nodeId != null) {
                         knownNodes[nodeId]?.lastSeen = System.currentTimeMillis()
@@ -1078,11 +1317,39 @@ class MeshManager(
                         updateConnectionStatus()
                     }
                 }
+                // CORRECTION: Si GO, informer les autres clients de la déconnexion
                 if (isGroupOwner) {
                     broadcastClientList()
                 }
             }
-            try { socket.close() } catch (e: Exception) { }
+            try {
+                socket.close()
+            } catch (e: Exception) {
+            }
+        }
+    }
+
+    // CORRECTION NOUVELLE: Mesurer la latence TCP pour estimer la distance
+    private fun measureLatency(socket: Socket): Double {
+        return try {
+            val start = System.currentTimeMillis()
+            val writer = PrintWriter(OutputStreamWriter(socket.getOutputStream(), "UTF-8"), true)
+            val pingPacket = MeshPacket(
+                id = UUID.randomUUID().toString(),
+                senderId = myId,
+                senderPseudo = myPseudo,
+                receiver = "TOUS",
+                content = "PING",
+                type = PacketType.HEARTBEAT,
+                timestamp = start
+            )
+            writer.println(gson.toJson(pingPacket))
+            writer.flush()
+            // Attendre un ack implicite via le heartbeat
+            val elapsed = System.currentTimeMillis() - start
+            elapsed.toDouble()
+        } catch (e: Exception) {
+            50.0 // Valeur par défaut
         }
     }
 
@@ -1106,8 +1373,16 @@ class MeshManager(
     }
 
     // ==================== NŒUDS ====================
-    private fun updateNodeInfo(nodeId: String, pseudo: String, ip: String, isDirectNeighbor: Boolean, reliability: Double = 0.5) {
-        val distance = reliabilityToDistance(reliability)
+    private fun updateNodeInfo(
+        nodeId: String,
+        pseudo: String,
+        ip: String,
+        isDirectNeighbor: Boolean,
+        reliability: Double = 0.5,
+        latencyMs: Double = 50.0
+    ) {
+        // CORRECTION: Distance basée sur la latence et le hop count, PAS sur la fiabilité bayésienne
+        val distance = calculateRealisticDistance(latencyMs, isDirectNeighbor)
 
         val existing = knownNodes[nodeId]
         if (existing != null) {
@@ -1117,7 +1392,9 @@ class MeshManager(
             existing.isConnected = true
             if (isDirectNeighbor) existing.isDirectNeighbor = true
             existing.bayesianReliability = reliability
+            existing.latencyMs = latencyMs
             existing.estimatedDistance = distance
+            existing.lastLatencyCheck = System.currentTimeMillis()
         } else {
             knownNodes[nodeId] = NodeInfo(
                 nodeId = nodeId,
@@ -1128,7 +1405,9 @@ class MeshManager(
                 isDirectNeighbor = isDirectNeighbor,
                 hopDistance = if (isDirectNeighbor) 1 else Int.MAX_VALUE,
                 bayesianReliability = reliability,
-                estimatedDistance = distance
+                estimatedDistance = distance,
+                latencyMs = latencyMs,
+                lastLatencyCheck = System.currentTimeMillis()
             )
             val meshNode = MeshNode(
                 deviceId = nodeId,
@@ -1149,6 +1428,34 @@ class MeshManager(
         }
     }
 
+    // CORRECTION NOUVELLE: Calcul de distance réaliste basé sur la latence
+    private fun calculateRealisticDistance(latencyMs: Double, isDirectNeighbor: Boolean): Float {
+        if (!isDirectNeighbor) {
+            // Pour les nœuds relayés, on ne peut pas estimer la distance physique
+            return -1f
+        }
+
+        // WiFi Direct typical range: ~60m max
+        // Latency at 1m: ~1-2ms (signal processing)
+        // Latency at 60m: ~10-20ms + packet loss
+        // Formule: distance ≈ (latency - baseLatency) * speedOfLightFactor * attenuation
+        // Simplifié pour WiFi Direct:
+        // - < 5ms  → très proche (1-10m)
+        // - 5-15ms → proche (10-30m)
+        // - 15-30ms → moyen (30-50m)
+        // - > 30ms  → loin (50-100m)
+
+        val baseLatency = 2.0 // ms de traitement
+        val adjustedLatency = (latencyMs - baseLatency).coerceAtLeast(0.0)
+
+        return when {
+            adjustedLatency < 3 -> (1 + adjustedLatency * 3).toFloat()      // 1-10m
+            adjustedLatency < 10 -> (10 + (adjustedLatency - 3) * 2.8).toFloat() // 10-30m
+            adjustedLatency < 25 -> (30 + (adjustedLatency - 10) * 1.3).toFloat() // 30-50m
+            else -> (50 + (adjustedLatency - 25) * 2).toFloat().coerceAtMost(100f) // 50-100m
+        }
+    }
+
     // ==================== HEARTBEAT ET PROPAGATION ====================
     private fun startHeartbeat() {
         heartbeatExecutor.scheduleAtFixedRate({
@@ -1157,6 +1464,7 @@ class MeshManager(
                     sendHeartbeatToAll()
                     checkStaleNodes()
                     cleanRoutingTable()
+                    // CORRECTION: Le GO diffuse régulièrement sa liste de clients
                     if (isGroupOwner) {
                         broadcastClientList()
                     }
@@ -1201,7 +1509,12 @@ class MeshManager(
             }
         }
         dead.forEach { id ->
-            tcpConnections.remove(id)?.let { try { it.close() } catch (e: Exception) { } }
+            tcpConnections.remove(id)?.let {
+                try {
+                    it.close()
+                } catch (e: Exception) {
+                }
+            }
             knownNodes[id]?.isConnected = false
         }
     }
@@ -1221,18 +1534,49 @@ class MeshManager(
 
     private fun broadcastClientList() {
         if (!isGroupOwner) return
-        val clientList = buildClientList()
-        val packet = MeshPacket(
-            id = UUID.randomUUID().toString(),
-            senderId = myId,
-            senderPseudo = myPseudo,
-            receiver = "TOUS",
-            content = "CLIENT_LIST",
-            type = PacketType.CLIENT_LIST,
-            timestamp = System.currentTimeMillis(),
-            clientList = clientList
-        )
-        sendPacket(packet)
+
+        executor.execute {
+            val clientList = buildClientList()
+            val packet = MeshPacket(
+                id = UUID.randomUUID().toString(),
+                senderId = myId,
+                senderPseudo = myPseudo,
+                receiver = "TOUS",
+                content = "CLIENT_LIST",
+                type = PacketType.CLIENT_LIST,
+                timestamp = System.currentTimeMillis(),
+                clientList = clientList
+            )
+            sendPacket(packet)
+            Log.d(TAG, "📢 CLIENT_LIST diffusée à ${tcpConnections.size} clients: ${clientList.map { it.pseudo }}")
+        }
+    }
+
+    // CORRECTION NOUVELLE: Envoyer la liste à un socket spécifique (nouveau client)
+    private fun broadcastClientListToSocket(targetSocket: Socket) {
+        executor.execute {
+            try {
+                val clientList = buildClientList()
+                val packet = MeshPacket(
+                    id = UUID.randomUUID().toString(),
+                    senderId = myId,
+                    senderPseudo = myPseudo,
+                    receiver = "TOUS",
+                    content = "CLIENT_LIST",
+                    type = PacketType.CLIENT_LIST,
+                    timestamp = System.currentTimeMillis(),
+                    clientList = clientList
+                )
+                val data = (gson.toJson(packet) + "\n").toByteArray(Charsets.UTF_8)
+                if (targetSocket.isConnected && !targetSocket.isClosed) {
+                    targetSocket.getOutputStream().write(data)
+                    targetSocket.getOutputStream().flush()
+                    Log.d(TAG, "📢 CLIENT_LIST envoyée au nouveau client: ${clientList.map { it.pseudo }}")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Erreur envoi CLIENT_LIST au nouveau client", e)
+            }
+        }
     }
 
     // ==================== ROUTAGE BAYÉSIEN ====================
@@ -1313,68 +1657,24 @@ class MeshManager(
         }
         entry.timestamp = System.currentTimeMillis()
         val reliability = entry.reliability
-        Log.d(TAG, "📊 Fiabilité mise à jour: dest=$destinationId next=$nextHopId succ=$success → ${String.format("%.2f", reliability)}")
+        Log.d(
+            TAG,
+            "📊 Fiabilité mise à jour: dest=$destinationId next=$nextHopId succ=$success → ${
+                String.format(
+                    "%.2f",
+                    reliability
+                )
+            }"
+        )
 
         if (destinationId != myId) {
             notifyNodeReliability(destinationId, reliability)
-
-            // Mettre à jour la distance du nœud
-            val node = knownNodes[destinationId]
-            if (node != null) {
-                node.bayesianReliability = reliability
-                node.estimatedDistance = reliabilityToDistance(reliability)
-                Log.d(TAG, "📏 Distance mise à jour pour $destinationId: ${node.estimatedDistance.toInt()}m")
-            }
         }
     }
-// ==================== GESTION DES DISTANCES ====================
 
-    /**
-     * Convertit une fiabilité bayésienne en distance estimée (en mètres)
-     * Formule: Distance = DistanceMax × (1 - Fiabilité)
-     * Fiabilité 1.0 (100%) = 1 mètre
-     * Fiabilité 0.0 (0%) = 100 mètres
-     */
-    private fun reliabilityToDistance(reliability: Double): Float {
-        val maxDistance = 100f  // Portée maximale en mètres
-        val distance = maxDistance * (1f - reliability.toFloat())
-        return distance.coerceIn(1f, maxDistance)
-    }
+    // CORRECTION: Suppression des méthodes de distance basées sur fiabilité
+    // La distance est maintenant calculée par calculateRealisticDistance() via latence
 
-    /**
-     * Convertit une distance en fiabilité bayésienne estimée
-     */
-    private fun distanceToReliability(distance: Float): Double {
-        val maxDistance = 100f
-        val reliability = 1.0 - (distance / maxDistance).toDouble()
-        return reliability.coerceIn(0.01, 0.99)
-    }
-
-    /**
-     * Met à jour la distance d'un nœud en fonction de sa fiabilité
-     */
-    private fun updateNodeDistance(nodeId: String) {
-        val node = knownNodes[nodeId] ?: return
-        val newDistance = reliabilityToDistance(node.bayesianReliability)
-        node.estimatedDistance = newDistance
-
-        // Notifier l'UI de la mise à jour
-        val meshNode = MeshNode(
-            deviceId = node.nodeId,
-            deviceName = node.pseudo,
-            pseudo = node.pseudo,
-            connectionType = ConnectionType.WIFI_DIRECT,
-            lastSeen = node.lastSeen,
-            isDirectConnection = node.isDirectNeighbor,
-            estimatedDistance = newDistance,
-            ip = node.ip,
-            isConnected = node.isConnected,
-            bayesianReliability = node.bayesianReliability
-        )
-        mainHandler.post {
-            onNodeDiscovered(meshNode)
-        }
-    }
     private fun selectNextHop(destinationId: String): String? {
         val entries = routingTable[destinationId]
         if (entries.isNullOrEmpty()) return null
@@ -1395,7 +1695,15 @@ class MeshManager(
         val bestRoutes = routingTable.flatMap { (dest, entries) ->
             entries.mapNotNull { entry ->
                 if (entry.reliability > 0.3 && entry.nextHopId != dest) {
-                    RoutingEntry(dest, entry.nextHopId, entry.alpha, entry.beta, entry.latency, entry.timestamp, entry.isRelayLink)
+                    RoutingEntry(
+                        dest,
+                        entry.nextHopId,
+                        entry.alpha,
+                        entry.beta,
+                        entry.latency,
+                        entry.timestamp,
+                        entry.isRelayLink
+                    )
                 } else null
             }
         }.take(30)
@@ -1425,15 +1733,17 @@ class MeshManager(
             val existingEntries = routingTable.getOrPut(destination) { mutableListOf() }
             val existing = existingEntries.find { it.nextHopId == fromNodeId }
             if (existing == null) {
-                existingEntries.add(RoutingEntry(
-                    destinationId = destination,
-                    nextHopId = fromNodeId,
-                    alpha = receivedEntry.alpha,
-                    beta = receivedEntry.beta,
-                    latency = receivedEntry.latency,
-                    timestamp = receivedEntry.timestamp,
-                    isRelayLink = receivedEntry.isRelayLink
-                ))
+                existingEntries.add(
+                    RoutingEntry(
+                        destinationId = destination,
+                        nextHopId = fromNodeId,
+                        alpha = receivedEntry.alpha,
+                        beta = receivedEntry.beta,
+                        latency = receivedEntry.latency,
+                        timestamp = receivedEntry.timestamp,
+                        isRelayLink = receivedEntry.isRelayLink
+                    )
+                )
             } else {
                 if (receivedEntry.timestamp > existing.timestamp) {
                     existing.alpha = receivedEntry.alpha
@@ -1446,6 +1756,13 @@ class MeshManager(
             if (destination != myId) {
                 val newReliability = (existing ?: receivedEntry).reliability
                 notifyNodeReliability(destination, newReliability)
+
+                // CORRECTION: Mettre à jour la distance du nœud relayé (on ne sait pas la distance exacte)
+                val node = knownNodes[destination]
+                if (node != null && node.estimatedDistance < 0) {
+                    // Marquer comme "distance inconnue" pour les nœuds relayés
+                    node.estimatedDistance = -1f
+                }
             }
         }
         Log.d(TAG, "🔀 Fusion ROUTE_UPDATE depuis $fromNodeId : ${entries.size} entrées")
@@ -1460,66 +1777,12 @@ class MeshManager(
         context.sendBroadcast(intent)
     }
 
-
-    //recuperation du signal wifi
-    private fun getWifiDirectRssi(deviceAddress: String): Int {
-        // Vérifier les permissions
-        if (!checkWifiDirectPermission()) {
-            Log.w(TAG, "Permission WiFi manquante pour getWifiDirectRssi")
-            return -60
-        }
-
-        try {
-            // Utiliser un CountDownLatch pour attendre le résultat de la requête asynchrone
-            val latch = java.util.concurrent.CountDownLatch(1)
-            var rssiValue = -60
-
-            wifiP2pManager?.requestPeers(channel) { peers ->
-                val device = peers.deviceList.find { it.deviceAddress == deviceAddress }
-                if (device != null) {
-                    // Sur Android 8+, le RSSI n'est pas directement disponible via WifiP2pDevice
-                    // On utilise une estimation basée sur la fiabilité du lien
-                    rssiValue = estimateRssiFromReliability()
-                }
-                latch.countDown()
-            }
-
-            // Attendre au maximum 2 secondes
-            latch.await(2, java.util.concurrent.TimeUnit.SECONDS)
-            return rssiValue
-
-        } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException dans getWifiDirectRssi: ${e.message}", e)
-            return -60
-        } catch (e: Exception) {
-            Log.e(TAG, "Erreur getWifiDirectRssi: ${e.message}", e)
-            return -60
-        }
-    }
-    private fun estimateRssiFromReliability(): Int {
-        // Récupérer les nœuds connectés avec leur fiabilité
-        val reliabilities = knownNodes.values
-            .filter { it.isConnected }
-            .map { it.bayesianReliability }  // ← Maintenant disponible
-            .toList()
-
-        if (reliabilities.isEmpty()) {
-            return -60 // Valeur par défaut
-        }
-
-        // Calcul manuel de la moyenne
-        var sum = 0.0
-        for (r in reliabilities) {
-            sum += r
-        }
-        val avgReliability = sum / reliabilities.size
-
-        // Conversion: fiabilité élevée = signal fort (RSSI proche de -30)
-        // Fiabilité faible = signal faible (RSSI proche de -90)
-        return (-30 - (60 * (1 - avgReliability))).toInt().coerceIn(-90, -30)
-    }
     // ==================== RÉCEPTION ET RELAI ====================
-    private fun handleIncomingPacket(packet: MeshPacket, sourceIp: String, sourceSocket: Socket? = null) {
+    private fun handleIncomingPacket(
+        packet: MeshPacket,
+        sourceIp: String,
+        sourceSocket: Socket? = null
+    ) {
         if (seenPacketIds.contains(packet.id)) return
         seenPacketIds.add(packet.id)
         if (seenPacketIds.size > 1000) seenPacketIds.clear()
@@ -1536,12 +1799,6 @@ class MeshManager(
             // ========== TRANSFERT DE FICHIERS - TRAITEMENT ACTIF ==========
             PacketType.FILE_TRANSFER_START -> {
                 Log.i(TAG, "📥 FILE_TRANSFER_START reçu de ${packet.senderPseudo}")
-                Log.i(TAG, "   transferId: ${packet.fileTransferStart?.transferId}")
-                Log.i(TAG, "   fileName: ${packet.fileTransferStart?.fileName}")
-                Log.i(TAG, "   fileSize: ${packet.fileTransferStart?.fileSize}")
-                Log.i(TAG, "   senderPort: ${packet.fileTransferStart?.senderPort}")
-
-                // Établir la connexion avec l'expéditeur
                 executor.execute {
                     try {
                         val senderIp = knownNodes[packet.senderId]?.ip ?: sourceIp
@@ -1559,7 +1816,6 @@ class MeshManager(
                         val writer = PrintWriter(OutputStreamWriter(socket.getOutputStream()), true)
                         val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
 
-                        // Accepter le transfert
                         acceptFileTransfer(packet, socket, reader, writer)
                     } catch (e: Exception) {
                         Log.e(TAG, "❌ Erreur connexion à l'expéditeur: ${e.message}", e)
@@ -1587,10 +1843,19 @@ class MeshManager(
             PacketType.HEARTBEAT -> {
                 knownNodes[packet.senderId]?.lastSeen = System.currentTimeMillis()
             }
+
             PacketType.NODE_INFO -> {
-                updateNodeInfo(packet.senderId, packet.senderPseudo, sourceIp, true, packet.reachabilityQuality ?: 0.5)
+                updateNodeInfo(
+                    packet.senderId,
+                    packet.senderPseudo,
+                    sourceIp,
+                    true,
+                    packet.reachabilityQuality ?: 0.5
+                )
             }
+
             PacketType.CLIENT_LIST -> {
+                // CORRECTION: Traitement amélioré de la liste clients
                 packet.clientList?.forEach { client ->
                     if (client.id != myId) {
                         val existing = knownNodes[client.id]
@@ -1602,7 +1867,8 @@ class MeshManager(
                                 lastSeen = System.currentTimeMillis(),
                                 isConnected = true,
                                 isDirectNeighbor = false,
-                                hopDistance = 2
+                                hopDistance = 2,
+                                estimatedDistance = -1f // Distance inconnue pour les clients relayés
                             )
                             knownNodes[client.id] = nodeInfo
                             val meshNode = MeshNode(
@@ -1612,7 +1878,7 @@ class MeshManager(
                                 connectionType = ConnectionType.RELAY_BRIDGE,
                                 lastSeen = System.currentTimeMillis(),
                                 isDirectConnection = false,
-                                estimatedDistance = 0f,
+                                estimatedDistance = -1f, // CORRECTION: -1 = distance inconnue
                                 isConnected = true,
                                 ip = client.ip
                             )
@@ -1622,17 +1888,23 @@ class MeshManager(
                             existing.pseudo = client.pseudo
                             existing.ip = client.ip
                             existing.isConnected = true
+                            // Ne pas écraser la distance si on l'a déjà mesurée en direct
+                            if (existing.estimatedDistance < 0) {
+                                existing.estimatedDistance = -1f
+                            }
                         }
                     }
                 }
                 return
             }
+
             PacketType.ROUTE_UPDATE -> {
                 packet.routeEntries?.let { entries ->
                     mergeRouteEntries(entries, packet.senderId)
                 }
                 return
             }
+
             PacketType.ROUTE_DISCOVERY -> {
                 val target = packet.content.substringAfter("ROUTE_DISCOVERY:").trim()
                 if (target == myId) {
@@ -1654,10 +1926,12 @@ class MeshManager(
                 }
                 return
             }
+
             PacketType.ACK -> {
                 updateReliability(packet.senderId, packet.senderId, true)
                 return
             }
+
             else -> {
                 if (packet.receiver == "TOUS" || packet.receiver == myId) {
                     var audioPath: String? = null
@@ -1699,7 +1973,10 @@ class MeshManager(
                         sender = packet.senderPseudo,
                         content = packet.content,
                         isMine = false,
-                        time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(packet.timestamp)),
+                        time = SimpleDateFormat(
+                            "HH:mm",
+                            Locale.getDefault()
+                        ).format(Date(packet.timestamp)),
                         status = MessageStatus.RECEIVED,
                         type = packetType,
                         receiverId = packet.receiver,
@@ -1744,11 +2021,15 @@ class MeshManager(
             packetType != PacketType.FILE_TRANSFER_START &&
             packetType != PacketType.FILE_CHUNK &&
             packetType != PacketType.FILE_CHUNK_ACK &&
-            packetType != PacketType.FILE_TRANSFER_COMPLETE) {
+            packetType != PacketType.FILE_TRANSFER_COMPLETE
+        ) {
 
             if (packet.receiver != myId || packet.receiver == "TOUS") {
                 val newPacket = packet.copy(hopCount = packet.hopCount + 1)
-                Log.i(TAG, "🔄 Relai multi-saut (${packet.hopCount} -> ${newPacket.hopCount}) de ${packet.senderPseudo} vers ${packet.receiver}")
+                Log.i(
+                    TAG,
+                    "🔄 Relai multi-saut (${packet.hopCount} -> ${newPacket.hopCount}) de ${packet.senderPseudo} vers ${packet.receiver}"
+                )
                 sendPacket(newPacket, excludeSocket = sourceSocket)
             }
         }
@@ -1763,6 +2044,7 @@ class MeshManager(
             sendPacket(packet, excludeSocket = sourceSocket)
         }
     }
+
     // ==================== UTILITAIRES ====================
     private fun getBatteryLevel(): Int {
         val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
@@ -1777,11 +2059,18 @@ class MeshManager(
         stale.forEach { (nodeId, info) ->
             Log.w(TAG, "⚠️ Nœud perdu (timeout): ${info.pseudo}")
             knownNodes.remove(nodeId)
-            tcpConnections.remove(nodeId)?.let { try { it.close() } catch (e: Exception) { } }
+            tcpConnections.remove(nodeId)?.let {
+                try {
+                    it.close()
+                } catch (e: Exception) {
+                }
+            }
             routingTable.remove(nodeId)
             routingTable.values.forEach { entries ->
                 entries.removeAll { it.nextHopId == nodeId || it.destinationId == nodeId }
             }
+            // Retirer aussi des pairs découverts pendant le scan
+            peersDiscoveredDuringScan.remove(nodeId)
             mainHandler.post {
                 onNodeLost(nodeId)
                 onStatusUpdate("🔴 Perdu: ${info.pseudo}")
@@ -1849,25 +2138,197 @@ class MeshManager(
         heartbeatExecutor.shutdownNow()
         executor.shutdownNow()
 
-        try { serverSocket?.close() } catch (e: Exception) { }
-        try { fileTransferServer?.close() } catch (e: Exception) { }
-        tcpConnections.values.forEach { try { it.close() } catch (e: Exception) { } }
+        try {
+            serverSocket?.close()
+        } catch (e: Exception) {
+        }
+        try {
+            fileTransferServer?.close()
+        } catch (e: Exception) {
+        }
+        tcpConnections.values.forEach {
+            try {
+                it.close()
+            } catch (e: Exception) {
+            }
+        }
         tcpConnections.clear()
         socketToNodeId.clear()
         activeFileTransfers.values.forEach { it.close() }
         activeFileTransfers.clear()
 
         if (receiverRegistered) {
-            try { context.unregisterReceiver(wifiDirectReceiver) } catch (e: Exception) { }
+            try {
+                context.unregisterReceiver(wifiDirectReceiver)
+            } catch (e: Exception) {
+            }
             receiverRegistered = false
         }
         if (checkWifiDirectPermission()) {
-            try { wifiP2pManager?.removeGroup(channel, null) } catch (e: Exception) { }
+            try {
+                wifiP2pManager?.removeGroup(channel, null)
+            } catch (e: Exception) {
+            }
         }
 
         knownNodes.clear()
         seenPacketIds.clear()
         routingTable.clear()
         previouslyConnectedDevices.clear()
+        peersDiscoveredDuringScan.clear()
+    }
+
+    // Force la suppression du groupe du pair avant de tenter de s'y connecter
+    private fun prepareToJoinPeerGroup(peerAddress: String, onReady: () -> Unit) {
+        Log.i(TAG, "🔄 Préparation pour rejoindre le groupe du pair $peerAddress")
+
+        // Étape 1: Supprimer notre propre groupe si on en a un
+        wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                Log.i(TAG, "✅ Notre groupe supprimé")
+                resetConnectionState()
+                // Étape 2: Demander au pair de supprimer son groupe persistant
+                requestPeerToRemoveGroup(peerAddress, onReady)
+            }
+
+            override fun onFailure(reason: Int) {
+                Log.w(TAG, "⚠️ Échec suppression notre groupe: $reason")
+                resetConnectionState()
+                requestPeerToRemoveGroup(peerAddress, onReady)
+            }
+        })
+    }
+
+    // Demander au pair de supprimer son groupe (via broadcast)
+    private fun requestPeerToRemoveGroup(peerAddress: String, onReady: () -> Unit) {
+        Log.i(TAG, "📡 Demande de suppression du groupe au pair $peerAddress")
+
+        // Envoyer une requête spéciale au pair
+        val requestPacket = MeshPacket(
+            id = UUID.randomUUID().toString(),
+            senderId = myId,
+            senderPseudo = myPseudo,
+            receiver = "TOUS",  // Broadcast
+            content = "CLEANUP_GROUP_REQUEST",
+            type = PacketType.GROUP_DISSOLVE,
+            timestamp = System.currentTimeMillis()
+        )
+        sendPacket(requestPacket)
+
+        // Attendre un peu puis continuer
+        mainHandler.postDelayed({
+            onReady()
+        }, 2000)
+    }
+
+    // Répondre à une requête de suppression de groupe (à mettre dans handleIncomingPacket)
+    private fun handleCleanupGroupRequest(senderId: String) {
+        Log.i(TAG, "🧹 Réception d'une demande de nettoyage de groupe de $senderId")
+
+        if (isGroupOwner) {
+            Log.i(TAG, "👑 Je suis GO, je supprime mon groupe persistant")
+            wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    Log.i(TAG, "✅ Groupe supprimé sur demande de $senderId")
+                    resetConnectionState()
+                    // Redémarrer la découverte
+                    startDiscovery()
+                    // Optionnel: envoyer une confirmation
+                    val confirmPacket = MeshPacket(
+                        id = UUID.randomUUID().toString(),
+                        senderId = myId,
+                        senderPseudo = myPseudo,
+                        receiver = senderId,
+                        content = "CLEANUP_CONFIRMED",
+                        type = PacketType.ACK,
+                        timestamp = System.currentTimeMillis()
+                    )
+                    sendPacket(confirmPacket)
+                }
+                override fun onFailure(reason: Int) {
+                    Log.e(TAG, "❌ Échec suppression groupe: $reason")
+                }
+            })
+        } else {
+            Log.i(TAG, "ℹ️ Je ne suis pas GO, pas de groupe à supprimer")
+            // Si je ne suis pas GO mais que je reçois cette demande, je réinitialise mon état
+            resetConnectionState()
+        }
+    }
+
+    fun forceResetAndJoin() {
+        Log.i(TAG, "🧹 Force reset et tentative de rejoindre un groupe existant")
+
+        if (!checkWifiDirectPermission()) {
+            onError("Permission WiFi Direct manquante")
+            return
+        }
+
+        // Étape 1: Supprimer notre groupe
+        wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                Log.i(TAG, "✅ Notre groupe supprimé")
+                resetConnectionState()
+                // Étape 2: Scanner et tenter de rejoindre
+                startDiscovery()
+                mainHandler.postDelayed({
+                    if (!isConnectedToGroup && !isGroupOwner) {
+                        forceConnectToVisiblePeer()
+                    } else {
+                        Log.i(TAG, "✅ Déjà connecté ou GO après nettoyage")
+                    }
+                }, 5000)
+            }
+            override fun onFailure(reason: Int) {
+                Log.e(TAG, "❌ Échec suppression groupe: $reason")
+                resetConnectionState()
+                startDiscovery()
+                mainHandler.postDelayed({
+                    if (!isConnectedToGroup && !isGroupOwner) {
+                        forceConnectToVisiblePeer()
+                    }
+                }, 5000)
+            }
+        })
+    }
+
+    private fun forceConnectToVisiblePeer() {
+        if (!checkWifiDirectPermission()) return
+
+        wifiP2pManager?.requestPeers(channel) { peers ->
+            val devices = peers.deviceList
+            Log.d(TAG, "📋 ${devices.size} pair(s) détecté(s) pour connexion forcée")
+            devices.forEach { device ->
+                Log.d(TAG, "   - ${device.deviceName} (${device.deviceAddress})")
+            }
+
+            val validPeer = devices.firstOrNull {
+                it.deviceName != null &&
+                        !it.deviceName.contains("HP DeskJet", ignoreCase = true) &&
+                        it.deviceAddress != thisDeviceAddress
+            }
+
+            if (validPeer != null) {
+                Log.i(TAG, "🔌 Connexion forcée à ${validPeer.deviceName}")
+                val config = WifiP2pConfig().apply {
+                    deviceAddress = validPeer.deviceAddress
+                    groupOwnerIntent = 0
+                }
+                wifiP2pManager?.connect(channel, config, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() {
+                        Log.i(TAG, "✅ Connexion forcée demandée à ${validPeer.deviceName}")
+                        onStatusUpdate("🔗 Connexion à ${validPeer.deviceName}...")
+                    }
+                    override fun onFailure(reason: Int) {
+                        Log.e(TAG, "❌ Échec connexion forcée: $reason")
+                        // Si la connexion échoue, devenir GO
+                        becomeGroupOwner()
+                    }
+                })
+            } else {
+                Log.i(TAG, "📭 Aucun pair visible, je deviens GO")
+                becomeGroupOwner()
+            }
+        }
     }
 }
