@@ -3,6 +3,7 @@ package com.example.myapplication
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -13,6 +14,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.util.UUID
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MeshService : Service() {
@@ -29,6 +31,7 @@ class MeshService : Service() {
     private val isServiceReady  = AtomicBoolean(false)
     private val isInitializing  = AtomicBoolean(false)
     private val handler         = Handler(Looper.getMainLooper())
+    private val executor        = Executors.newSingleThreadExecutor()
 
     override fun onCreate() {
         super.onCreate()
@@ -82,6 +85,7 @@ class MeshService : Service() {
             Log.e(TAG, "💥 Erreur onStartCommand", e)
         }
 
+        // START_STICKY pour que le service redémarre s'il est tué
         return START_STICKY
     }
 
@@ -92,6 +96,7 @@ class MeshService : Service() {
         handler.removeCallbacksAndMessages(null)
         try { meshManager?.stop() } catch (e: Exception) { }
         meshManager = null
+        executor.shutdown()
         super.onDestroy()
         Log.i(TAG, "✅ MeshService totalement arrêté")
     }
@@ -113,13 +118,35 @@ class MeshService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        // Intent pour ouvrir l'app
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val openAppPendingIntent = PendingIntent.getActivity(
+            this, 0, openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // Intent pour arrêter le service
+        val stopIntent = Intent(this, MeshService::class.java).apply {
+            action = "ACTION_STOP_SERVICE"
+        }
+        val stopPendingIntent = PendingIntent.getService(
+            this, 1, stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val pseudoText = myPseudo ?: "Téléphone"
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("MIT MESH Network")
-            .setContentText("🌐 Réseau maillé en cours d'exécution...")
+            .setContentTitle("📡 MIT MESH Network")
+            .setContentText("🔍 $pseudoText - Détectable par les autres téléphones")
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentIntent(openAppPendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Arrêter", stopPendingIntent)
             .build()
     }
 
@@ -153,11 +180,14 @@ class MeshService : Service() {
                 onStatusUpdate = { status ->
                     Log.i(TAG, "📡 [Status] $status")
                     broadcastToApp("MESH_STATUS_CHANGED", "status", status)
+                    // Mettre à jour la notification
+                    updateNotification(status)
                 },
                 onMessageReceived = { msg ->
                     val intent = Intent("MESH_MESSAGE_RECEIVED").apply {
                         putExtra("id", msg.id)
                         putExtra("sender", msg.sender)
+                        putExtra("sender_id", msg.senderIdRaw)
                         putExtra("content", msg.content)
                         putExtra("receiver", msg.receiverId)
                         putExtra("type", msg.type.name)
@@ -204,6 +234,22 @@ class MeshService : Service() {
             handler.postDelayed({ if (!isServiceReady.get()) setupMeshManager() }, 5000)
         }
     }
+
+    private fun updateNotification(status: String) {
+        try {
+            val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("📡 MIT MESH Network")
+                .setContentText(status)
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setOngoing(true)
+                .build()
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager.notify(NOTIF_ID, notification)
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur mise à jour notification: ${e.message}")
+        }
+    }
+
     private fun handleIntentAction(intent: Intent) {
         when (intent.action) {
             "ACTION_SEND_MESSAGE" -> {
@@ -233,7 +279,7 @@ class MeshService : Service() {
                     meshManager?.forceReconnectTcp()
                 }
             }
-            "ACTION_CLEANUP_AND_JOIN" -> {  // ← AJOUTER CE BLOC
+            "ACTION_CLEANUP_AND_JOIN" -> {
                 if (isServiceReady.get()) {
                     Log.i(TAG, "🧹 Action CLEANUP_AND_JOIN reçue")
                     meshManager?.forceResetAndJoin()
@@ -243,11 +289,14 @@ class MeshService : Service() {
             }
         }
     }
+
     private fun sendMessage(intent: Intent) {
         val content = intent.getStringExtra("content") ?: return
         val receiver = intent.getStringExtra("receiver") ?: "TOUS"
         val typeStr = intent.getStringExtra("type") ?: "MESSAGE"
         val type = try { PacketType.valueOf(typeStr) } catch (e: Exception) { PacketType.MESSAGE }
+        val replyToId = intent.getStringExtra("reply_to_id")
+        val replyToContent = intent.getStringExtra("reply_to_content")
 
         val audioData = intent.getByteArrayExtra("audio_data")
         val fileData = intent.getByteArrayExtra("file_data")
@@ -265,9 +314,27 @@ class MeshService : Service() {
             audioData = audioData,
             fileData = fileData,
             fileName = fileName,
-            fileSize = fileSize
+            fileSize = fileSize,
+            replyToId = replyToId,
+            replyToContent = replyToContent
         )
+
         executor.execute { meshManager?.sendPacket(packet) }
+
+        // Broadcast du message envoyé pour l'UI
+        val msgIntent = Intent("MESH_MESSAGE_RECEIVED").apply {
+            putExtra("id", packet.id)
+            putExtra("sender", myPseudo)
+            putExtra("sender_id", myId)
+            putExtra("content", content)
+            putExtra("receiver", receiver)
+            putExtra("type", type.name)
+            putExtra("timestamp", System.currentTimeMillis())
+            putExtra("reply_to_id", replyToId)
+            putExtra("reply_to_content", replyToContent)
+            setPackage(packageName)
+        }
+        sendBroadcast(msgIntent)
     }
 
     private fun sendLargeFile(intent: Intent) {
@@ -294,11 +361,10 @@ class MeshService : Service() {
                 sendBroadcast(progressIntent)
             },
             onComplete = {
-                // Envoyer un message au destinataire avec le BON senderId
                 val msgIntent = Intent("MESH_MESSAGE_RECEIVED").apply {
-                    putExtra("id", UUID.randomUUID().toString())
+                    putExtra("id", messageId ?: UUID.randomUUID().toString())
                     putExtra("sender", myPseudo)
-                    putExtra("sender_id", myId)           // ← ID correct
+                    putExtra("sender_id", myId)
                     putExtra("content", fileName)
                     putExtra("receiver", destination)
                     putExtra("type", if (isAudio) PacketType.AUDIO.name else PacketType.FILE.name)
@@ -338,6 +404,4 @@ class MeshService : Service() {
         val status = if (isServiceReady.get()) "READY" else "INITIALIZING"
         broadcastToApp("MESH_TOPOLOGY_UPDATE", "state", status)
     }
-
-    private val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
 }

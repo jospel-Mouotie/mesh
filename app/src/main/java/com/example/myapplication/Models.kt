@@ -16,7 +16,20 @@ enum class PacketType {
     CROSS_GROUP_MESSAGE, GROUP_ANNOUNCEMENT, CLIENT_LIST,
     CLIENT_LIST_REQUEST, ROUTE_DISCOVERY,
     FILE_TRANSFER_START, FILE_CHUNK, FILE_CHUNK_ACK,
-    FILE_TRANSFER_COMPLETE, FILE_TRANSFER_CANCEL, FILE_TRANSFER_RESUME,GROUP_DISSOLV
+    FILE_TRANSFER_COMPLETE, FILE_TRANSFER_CANCEL, FILE_TRANSFER_RESUME,GROUP_DISSOLV, GROUP_JOIN_RESPONSE , GROUP_JOIN_REQUEST,  BRIDGE_ADVERTISEMENT,
+
+}
+data class ExternalGroupInfo(
+    val groupId: String,
+    val goMac: String,
+    val goIp: String? = null,
+    val members: List<ClientInfo> = emptyList(),
+    val lastSeen: Long = System.currentTimeMillis(),
+    val connectionType: ConnectionTypeExt = ConnectionTypeExt.BLE
+)
+
+enum class ConnectionTypeExt {
+    WIFI_DIRECT, BLE, HYBRID
 }
 
 // ==================== TRANSFERT DE FICHIERS ====================
@@ -67,7 +80,9 @@ data class MeshPacket(
     val fileChunk: FileChunkInfo? = null,
     val fileChunkData: ByteArray? = null,
     val transferId: String? = null,
-    val chunkIndex: Int = -1
+    val chunkIndex: Int = -1,
+    val replyToId: String? = null,
+    val replyToContent: String? = null
 ) {
     override fun equals(other: Any?): Boolean = other is MeshPacket && id == other.id
     override fun hashCode(): Int = id.hashCode()
